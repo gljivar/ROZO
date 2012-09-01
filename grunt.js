@@ -24,7 +24,24 @@ module.exports = function(grunt) {
     // route.
     jshint: {
       options: {
-        scripturl: true
+        browser: true,
+        scripturl: true,
+        camelcase: true,
+        curly: true,
+        forin: true,
+        indent: 2,
+        latedef: true,
+        undef: true,
+        unused: true
+      },
+      globals: {
+        Backbone: true,
+        $: true,
+        define: true,
+        require: true,
+        console: false,
+        alert: false,
+        prompt: false
       }
     },
 
