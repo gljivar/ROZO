@@ -6,7 +6,7 @@ define([
 
   // Plugins.
   "plugins/backbone.layoutmanager",
-   "vendor/bootstrap/js/bootstrap"
+  "vendor/bootstrap/js/bootstrap"
 ],
 
 function($, _, Backbone) {
@@ -23,6 +23,7 @@ function($, _, Backbone) {
 
   // Configure LayoutManager with Backbone Boilerplate defaults.
   Backbone.LayoutManager.configure({
+    manage: true,
     paths: {
       layout: "app/templates/layouts/",
       template: "app/templates/"
