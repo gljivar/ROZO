@@ -1,5 +1,5 @@
 /*!
- * Lo-Dash v0.4.2 <http://lodash.com>
+ * Lo-Dash v0.6.1 <http://lodash.com>
  * Copyright 2012 John-David Dalton <http://allyoucanleet.com/>
  * Based on Underscore.js 1.3.3, copyright 2009-2012 Jeremy Ashkenas, DocumentCloud Inc.
  * <http://documentcloud.github.com/underscore>
@@ -39,10 +39,16 @@
 
   /** Native prototype shortcuts */
   var ArrayProto = Array.prototype,
-      ObjectProto = Object.prototype;
+      BoolProto = Boolean.prototype,
+      ObjectProto = Object.prototype,
+      NumberProto = Number.prototype,
+      StringProto = String.prototype;
 
   /** Used to generate unique IDs */
   var idCounter = 0;
+
+  /** Used by `cachedContains` as the default size when optimizations are enabled for large arrays */
+  var largeArraySize = 30;
 
   /** Used to restore the original `_` reference in `noConflict` */
   var oldDash = window._;
@@ -50,10 +56,16 @@
   /** Used to detect delimiter values that should be processed by `tokenizeEvaluate` */
   var reComplexDelimiter = /[-+=!~*%&^<>|{(\/]|\[\D|\b(?:delete|in|instanceof|new|typeof|void)\b/;
 
+  /** Used to match HTML entities */
+  var reEscapedHtml = /&(?:amp|lt|gt|quot|#x27);/g;
+
   /** Used to match empty string literals in compiled template source */
   var reEmptyStringLeading = /\b__p \+= '';/g,
       reEmptyStringMiddle = /\b(__p \+=) '' \+/g,
       reEmptyStringTrailing = /(__e\(.*?\)|\b__t\)) \+\n'';/g;
+
+  /** Used to match regexp flags from their coerced string values */
+  var reFlags = /\w*$/;
 
   /** Used to insert the data object variable into compiled template source */
   var reInsertVariable = /(?:__e|__t = )\(\s*(?![\d\s"']|this\.)/g;
@@ -65,11 +77,11 @@
       .replace(/valueOf|for [^\]]+/g, '.+?') + '$'
   );
 
-  /** Used to match tokens in template text */
+  /** Used to match internally used tokens in template text */
   var reToken = /__token__(\d+)/g;
 
-  /** Used to match unescaped characters in strings for inclusion in HTML */
-  var reUnescapedHtml = /[&<"']/g;
+  /** Used to match HTML characters */
+  var reUnescapedHtml = /[&<>"']/g;
 
   /** Used to match unescaped characters in compiled string literals */
   var reUnescapedString = /['\n\r\t\u2028\u2029\\]/g;
@@ -104,11 +116,13 @@
       nativeKeys = reNative.test(nativeKeys = Object.keys) && nativeKeys;
 
   /** `Object#toString` result shortcuts */
-  var arrayClass = '[object Array]',
+  var argsClass = '[object Arguments]',
+      arrayClass = '[object Array]',
       boolClass = '[object Boolean]',
       dateClass = '[object Date]',
       funcClass = '[object Function]',
       numberClass = '[object Number]',
+      objectClass = '[object Object]',
       regexpClass = '[object RegExp]',
       stringClass = '[object String]';
 
@@ -118,50 +132,129 @@
 
   /**
    * Detect the JScript [[DontEnum]] bug:
+   *
    * In IE < 9 an objects own properties, shadowing non-enumerable ones, are
    * made non-enumerable as well.
    */
-  var hasDontEnumBug = !propertyIsEnumerable.call({ 'valueOf': 0 }, 'valueOf');
+  var hasDontEnumBug;
+
+  /**
+   * Detect if `Array#shift` and `Array#splice` augment array-like objects
+   * incorrectly:
+   *
+   * Firefox < 10, IE compatibility mode, and IE < 9 have buggy Array `shift()`
+   * and `splice()` functions that fail to remove the last element, `value[0]`,
+   * of array-like objects even though the `length` property is set to `0`.
+   * The `shift()` method is buggy in IE 8 compatibility mode, while `splice()`
+   * is buggy regardless of mode in IE < 9 and buggy in compatibility mode in IE 9.
+   */
+  var hasObjectSpliceBug;
+
+  /** Detect if own properties are iterated after inherited properties (IE < 9) */
+  var iteratesOwnLast;
+
+  /** Detect if an `arguments` object's indexes are non-enumerable (IE < 9) */
+  var noArgsEnum = true;
+
+  (function() {
+    var object = { '0': 1, 'length': 1 },
+        props = [];
+
+    function ctor() { this.x = 1; }
+    ctor.prototype = { 'valueOf': 1, 'y': 1 };
+    for (var prop in new ctor) { props.push(prop); }
+    for (prop in arguments) { noArgsEnum = !prop; }
+
+    hasDontEnumBug = (props + '').length < 4;
+    iteratesOwnLast = props[0] != 'x';
+    hasObjectSpliceBug = (props.splice.call(object, 0, 1), object[0]);
+  }(1));
+
+  /** Detect if an `arguments` object's [[Class]] is unresolvable (Firefox < 4, IE < 9) */
+  var noArgsClass = !isArguments(arguments);
 
   /** Detect if `Array#slice` cannot be used to convert strings to arrays (Opera < 10.52) */
   var noArraySliceOnStrings = slice.call('x')[0] != 'x';
 
   /**
    * Detect lack of support for accessing string characters by index:
+   *
    * IE < 8 can't access characters by index and IE 8 can only access
    * characters by index on string literals.
    */
   var noCharByIndex = ('x'[0] + Object('x')[0]) != 'xx';
 
+  /**
+   * Detect if a node's [[Class]] is unresolvable (IE < 9)
+   * and that the JS engine won't error when attempting to coerce an object to
+   * a string without a `toString` property value of `typeof` "function".
+   */
+  try {
+    var noNodeClass = ({ 'toString': 0 } + '', toString.call(window.document || 0) == objectClass);
+  } catch(e) { }
+
   /* Detect if `Function#bind` exists and is inferred to be fast (all but V8) */
   var isBindFast = nativeBind && /\n|Opera/.test(nativeBind + toString.call(window.opera));
 
-  /* Detect if `Object.keys` exists and is inferred to be fast (V8, Opera, IE) */
+  /* Detect if `Object.keys` exists and is inferred to be fast (IE, Opera, V8) */
   var isKeysFast = nativeKeys && /^.+$|true/.test(nativeKeys + !!window.attachEvent);
 
-  /** Detect if sourceURL syntax is usable without erroring */
-  try {
-    // The JS engine in Adobe products, like InDesign, will throw a syntax error
-    // when it encounters a single line comment beginning with the `@` symbol.
-    // The JS engine in Narwhal will generate the function `function anonymous(){//}`
-    // and throw a syntax error. In IE, `@` symbols are part of its non-standard
-    // conditional compilation support. The `@cc_on` statement activates its
-    // support while the trailing `!` induces a syntax error to exlude it.
-    // See http://msdn.microsoft.com/en-us/library/121hztk3(v=vs.94).aspx
-    var useSourceURL = (Function('//@cc_on!')(), true);
-  } catch(e){ }
+  /* Detect if strict mode, "use strict", is inferred to be fast (V8) */
+  var isStrictFast = !isBindFast;
 
   /**
-   * Used to escape characters for inclusion in HTML.
-   * The `>` and `/` characters don't require escaping in HTML and have no
-   * special meaning unless they're part of a tag or an unquoted attribute value
-   * http://mathiasbynens.be/notes/ambiguous-ampersands (semi-related fun fact)
+   * Detect if sourceURL syntax is usable without erroring:
+   *
+   * The JS engine in Adobe products, like InDesign, will throw a syntax error
+   * when it encounters a single line comment beginning with the `@` symbol.
+   *
+   * The JS engine in Narwhal will generate the function `function anonymous(){//}`
+   * and throw a syntax error.
+   *
+   * Avoid comments beginning `@` symbols in IE because they are part of its
+   * non-standard conditional compilation support.
+   * http://msdn.microsoft.com/en-us/library/121hztk3(v=vs.94).aspx
+   */
+  try {
+    var useSourceURL = (Function('//@')(), !window.attachEvent);
+  } catch(e){ }
+
+  /** Used to identify object classifications that are array-like */
+  var arrayLikeClasses = {};
+  arrayLikeClasses[boolClass] = arrayLikeClasses[dateClass] = arrayLikeClasses[funcClass] =
+  arrayLikeClasses[numberClass] = arrayLikeClasses[objectClass] = arrayLikeClasses[regexpClass] = false;
+  arrayLikeClasses[argsClass] = arrayLikeClasses[arrayClass] = arrayLikeClasses[stringClass] = true;
+
+  /** Used to identify object classifications that `_.clone` supports */
+  var cloneableClasses = {};
+  cloneableClasses[argsClass] = cloneableClasses[funcClass] = false;
+  cloneableClasses[arrayClass] = cloneableClasses[boolClass] = cloneableClasses[dateClass] =
+  cloneableClasses[numberClass] = cloneableClasses[objectClass] = cloneableClasses[regexpClass] =
+  cloneableClasses[stringClass] = true;
+
+  /**
+   * Used to convert characters to HTML entities:
+   *
+   * Though the `>` character is escaped for symmetry, characters like `>` and `/`
+   * don't require escaping in HTML and have no special meaning unless they're part
+   * of a tag or an unquoted attribute value.
+   * http://mathiasbynens.be/notes/ambiguous-ampersands (under "semi-related fun fact")
    */
   var htmlEscapes = {
     '&': '&amp;',
     '<': '&lt;',
+    '>': '&gt;',
     '"': '&quot;',
     "'": '&#x27;'
+  };
+
+  /** Used to convert HTML entities to characters */
+  var htmlUnescapes = {
+    '&amp;': '&',
+    '&lt;': '<',
+    '&gt;': '>',
+    '&quot;': '"',
+    '&#x27;': "'"
   };
 
   /** Used to determine if values are of the language type Object */
@@ -171,7 +264,8 @@
     'object': true,
     'number': false,
     'string': false,
-    'undefined': false
+    'undefined': false,
+    'unknown': true
   };
 
   /** Used to escape characters for inclusion in compiled string literals */
@@ -216,8 +310,9 @@
   }
 
   /**
-   * By default, Lo-Dash uses embedded Ruby (ERB) style template delimiters,
-   * change the following template settings to use alternative delimiters.
+   * By default, the template delimiters used by Lo-Dash are similar to those in
+   * embedded Ruby (ERB). Change the following template settings to use alternative
+   * delimiters.
    *
    * @static
    * @memberOf _
@@ -259,7 +354,7 @@
      * @memberOf _.templateSettings
      * @type String
      */
-    'variable': 'obj'
+    'variable': ''
   };
 
   /*--------------------------------------------------------------------------*/
@@ -273,10 +368,10 @@
    */
   var iteratorTemplate = template(
     // conditional strict mode
-   '<% if (useStrict) { %>\'use strict\';\n<% } %>' +
+    '<% if (useStrict) { %>\'use strict\';\n<% } %>' +
 
     // the `iteratee` may be reassigned by the `top` snippet
-    'var index, iteratee = <%= firstArg %>, ' +
+    'var index, value, iteratee = <%= firstArg %>, ' +
     // assign the `result` variable an initial value
     'result<% if (init) { %> = <%= init %><% } %>;\n' +
     // add code to exit early or do so if the first argument is falsey
@@ -287,7 +382,7 @@
     // the following branch is for iterating arrays and array-like objects
     '<% if (arrayBranch) { %>' +
     'var length = iteratee.length; index = -1;' +
-    '  <% if (objectBranch) { %>\nif (length === length >>> 0) {<% } %>' +
+    '  <% if (objectBranch) { %>\nif (length > -1 && length === length >>> 0) {<% } %>' +
 
     // add support for accessing string characters by index if needed
     '  <% if (noCharByIndex) { %>\n' +
@@ -298,6 +393,7 @@
 
     '  <%= arrayBranch.beforeLoop %>;\n' +
     '  while (++index < length) {\n' +
+    '    value = iteratee[index];\n' +
     '    <%= arrayBranch.inLoop %>\n' +
     '  }' +
     '  <% if (objectBranch) { %>\n}<% } %>' +
@@ -305,34 +401,18 @@
 
     // the following branch is for iterating an object's own/inherited properties
     '<% if (objectBranch) { %>' +
-    '  <% if (arrayBranch) { %>\nelse {<% } %>' +
-    '  <% if (!hasDontEnumBug) { %>\n' +
-    '  var skipProto = typeof iteratee == \'function\' && \n' +
-    '    propertyIsEnumerable.call(iteratee, \'prototype\');\n' +
-    '  <% } %>' +
+    '  <% if (arrayBranch) { %>\nelse {' +
 
-    // iterate own properties using `Object.keys` if it's fast
-    '  <% if (isKeysFast && useHas) { %>\n' +
-    '  var props = nativeKeys(iteratee),\n' +
-    '      propIndex = -1,\n' +
-    '      length = props.length;\n\n' +
-    '  <%= objectBranch.beforeLoop %>;\n' +
-    '  while (++propIndex < length) {\n' +
-    '    index = props[propIndex];\n' +
-    '    if (!(skipProto && index == \'prototype\')) {\n' +
+    // add support for iterating over `arguments` objects if needed
+    '  <%  } else if (noArgsEnum) { %>\n' +
+    '  var length = iteratee.length; index = -1;\n' +
+    '  if (length && isArguments(iteratee)) {\n' +
+    '    while (++index < length) {\n' +
+    '      value = iteratee[index += \'\'];\n' +
     '      <%= objectBranch.inLoop %>\n' +
     '    }\n' +
-    '  }' +
-
-    // else using a for-in loop
-    '  <% } else { %>\n' +
-    '  <%= objectBranch.beforeLoop %>;\n' +
-    '  for (index in iteratee) {' +
-    '    <% if (hasDontEnumBug) { %>\n' +
-    '    <%   if (useHas) { %>if (hasOwnProperty.call(iteratee, index)) {\n  <% } %>' +
-    '    <%= objectBranch.inLoop %>;\n' +
-    '    <%   if (useHas) { %>}<% } %>' +
-    '    <% } else { %>\n' +
+    '  } else {' +
+    '  <% } %>' +
 
     // Firefox < 3.6, Opera > 9.50 - Opera < 11.60, and Safari < 5.1
     // (if the prototype or a property on the prototype has been set)
@@ -340,11 +420,38 @@
     // value to `true`. Because of this Lo-Dash standardizes on skipping
     // the the `prototype` property of functions regardless of its
     // [[Enumerable]] value.
-    '    if (!(skipProto && index == \'prototype\')<% if (useHas) { %> &&\n' +
-    '        hasOwnProperty.call(iteratee, index)<% } %>) {\n' +
-    '      <%= objectBranch.inLoop %>\n' +
-    '    }' +
+    '  <% if (!hasDontEnumBug) { %>\n' +
+    '  var skipProto = typeof iteratee == \'function\' && \n' +
+    '    propertyIsEnumerable.call(iteratee, \'prototype\');\n' +
+    '  <% } %>' +
+
+    // iterate own properties using `Object.keys` if it's fast
+    '  <% if (isKeysFast && useHas) { %>\n' +
+    '  var ownIndex = -1,\n' +
+    '      ownProps = objectTypes[typeof iteratee] ? nativeKeys(iteratee) : [],\n' +
+    '      length = ownProps.length;\n\n' +
+    '  <%= objectBranch.beforeLoop %>;\n' +
+    '  while (++ownIndex < length) {\n' +
+    '    index = ownProps[ownIndex];\n' +
+    '    <% if (!hasDontEnumBug) { %>if (!(skipProto && index == \'prototype\')) {\n  <% } %>' +
+    '    value = iteratee[index];\n' +
+    '    <%= objectBranch.inLoop %>\n' +
+    '    <% if (!hasDontEnumBug) { %>}\n<% } %>' +
+    '  }' +
+
+    // else using a for-in loop
+    '  <% } else { %>\n' +
+    '  <%= objectBranch.beforeLoop %>;\n' +
+    '  for (index in iteratee) {' +
+    '    <% if (!hasDontEnumBug || useHas) { %>\n    if (<%' +
+    '      if (!hasDontEnumBug) { %>!(skipProto && index == \'prototype\')<% }' +
+    '      if (!hasDontEnumBug && useHas) { %> && <% }' +
+    '      if (useHas) { %>hasOwnProperty.call(iteratee, index)<% }' +
+    '    %>) {' +
     '    <% } %>\n' +
+    '    value = iteratee[index];\n' +
+    '    <%= objectBranch.inLoop %>;\n' +
+    '    <% if (!hasDontEnumBug || useHas) { %>}\n<% } %>' +
     '  }' +
     '  <% } %>' +
 
@@ -360,11 +467,12 @@
     '      if (shadowed[k] == \'constructor\') {' +
     '        %>!(ctor && ctor.prototype === iteratee) && <%' +
     '      } %>hasOwnProperty.call(iteratee, index)) {\n' +
+    '    value = iteratee[index];\n' +
     '    <%= objectBranch.inLoop %>\n' +
     '  }' +
     '    <% } %>' +
     '  <% } %>' +
-    '  <% if (arrayBranch) { %>\n}<% } %>' +
+    '  <% if (arrayBranch || noArgsEnum) { %>\n}<% } %>' +
     '<% } %>\n' +
 
     // add code to the bottom of the iteration function
@@ -388,13 +496,49 @@
       'else if (thisArg) {\n' +
       '  callback = iteratorBind(callback, thisArg)\n' +
       '}',
-    'inLoop': 'callback(iteratee[index], index, collection)'
+    'inLoop': 'if (callback(value, index, collection) === false) return result'
+  };
+
+  /** Reusable iterator options for `countBy`, `groupBy`, and `sortBy` */
+  var countByIteratorOptions = {
+    'init': '{}',
+    'top':
+      'var prop;\n' +
+      'if (typeof callback != \'function\') {\n' +
+      '  var valueProp = callback;\n' +
+      '  callback = function(value) { return value[valueProp] }\n' +
+      '}\n' +
+      'else if (thisArg) {\n' +
+      '  callback = iteratorBind(callback, thisArg)\n' +
+      '}',
+    'inLoop':
+      'prop = callback(value, index, collection);\n' +
+      '(hasOwnProperty.call(result, prop) ? result[prop]++ : result[prop] = 1)'
+  };
+
+  /** Reusable iterator options for `drop` and `pick` */
+  var dropIteratorOptions = {
+    'useHas': false,
+    'args': 'object, callback, thisArg',
+    'init': '{}',
+    'top':
+      'var isFunc = typeof callback == \'function\';\n' +
+      'if (!isFunc) {\n' +
+      '  var props = concat.apply(ArrayProto, arguments)\n' +
+      '} else if (thisArg) {\n' +
+      '  callback = iteratorBind(callback, thisArg)\n' +
+      '}',
+    'inLoop':
+      'if (isFunc\n' +
+      '  ? !callback(value, index, object)\n' +
+      '  : indexOf(props, index) < 0\n' +
+      ') result[index] = value'
   };
 
   /** Reusable iterator options for `every` and `some` */
   var everyIteratorOptions = {
     'init': 'true',
-    'inLoop': 'if (!callback(iteratee[index], index, collection)) return !result'
+    'inLoop': 'if (!callback(value, index, collection)) return !result'
   };
 
   /** Reusable iterator options for `defaults` and `extend` */
@@ -404,17 +548,16 @@
     'args': 'object',
     'init': 'object',
     'top':
-      'for (var iterateeIndex = 1, length = arguments.length; iterateeIndex < length; iterateeIndex++) {\n' +
-      '  iteratee = arguments[iterateeIndex];\n' +
-      (hasDontEnumBug ? '  if (iteratee) {' : ''),
-    'inLoop': 'result[index] = iteratee[index]',
-    'bottom': (hasDontEnumBug ? '  }\n' : '') + '}'
+      'for (var argsIndex = 1, argsLength = arguments.length; argsIndex < argsLength; argsIndex++) {\n' +
+      '  if (iteratee = arguments[argsIndex]) {',
+    'inLoop': 'result[index] = value',
+    'bottom': '  }\n}'
   };
 
-  /** Reusable iterator options for `filter` and `reject` */
+  /** Reusable iterator options for `filter`, `reject`, and `where` */
   var filterIteratorOptions = {
     'init': '[]',
-    'inLoop': 'callback(iteratee[index], index, collection) && result.push(iteratee[index])'
+    'inLoop': 'callback(value, index, collection) && result.push(value)'
   };
 
   /** Reusable iterator options for `find`, `forEach`, `forIn`, and `forOwn` */
@@ -438,8 +581,8 @@
       'object': 'result = ' + (isKeysFast ? 'Array(length)' : '[]')
     },
     'inLoop': {
-      'array':  'result[index] = callback(iteratee[index], index, collection)',
-      'object': 'result' + (isKeysFast ? '[propIndex] = ' : '.push') + '(callback(iteratee[index], index, collection))'
+      'array':  'result[index] = callback(value, index, collection)',
+      'object': 'result' + (isKeysFast ? '[ownIndex] = ' : '.push') + '(callback(value, index, collection))'
     }
   };
 
@@ -460,7 +603,7 @@
     fromIndex || (fromIndex = 0);
 
     var length = array.length,
-        isLarge = (length - fromIndex) >= (largeSize || 30),
+        isLarge = (length - fromIndex) >= (largeSize || largeArraySize),
         cache = isLarge ? {} : array;
 
     if (isLarge) {
@@ -546,8 +689,8 @@
           if (typeof value == 'string') {
             value = { 'array': value, 'object': value };
           }
-          data.arrayBranch[prop] = value.array;
-          data.objectBranch[prop] = value.object;
+          data.arrayBranch[prop] = value.array || '';
+          data.objectBranch[prop] = value.object || '';
         } else {
           data[prop] = value;
         }
@@ -555,16 +698,18 @@
     }
     // set additional template `data` values
     var args = data.args,
-        firstArg = /^[^,]+/.exec(args)[0];
+        firstArg = /^[^,]+/.exec(args)[0],
+        useStrict = data.useStrict;
 
     data.firstArg = firstArg;
     data.hasDontEnumBug = hasDontEnumBug;
     data.isKeysFast = isKeysFast;
+    data.noArgsEnum = noArgsEnum;
     data.shadowed = shadowed;
     data.useHas = data.useHas !== false;
-    data.useStrict = data.useStrict !== false;
+    data.useStrict = useStrict == null ? isStrictFast : useStrict;
 
-    if (!('noCharByIndex' in data)) {
+    if (data.noCharByIndex == null) {
       data.noCharByIndex = noCharByIndex;
     }
     if (!data.exit) {
@@ -575,29 +720,35 @@
     }
     // create the function factory
     var factory = Function(
-        'arrayClass, bind, compareAscending, funcClass, hasOwnProperty, identity, ' +
-        'iteratorBind, objectTypes, nativeKeys, propertyIsEnumerable, slice, ' +
-        'stringClass, toString',
-      'return function(' + args + ') {\n' + iteratorTemplate(data) + '\n}'
+        'arrayLikeClasses, ArrayProto, bind, compareAscending, concat, forIn, ' +
+        'hasOwnProperty, identity, indexOf, isArguments, isArray, isFunction, ' +
+        'isPlainObject, iteratorBind, objectClass, objectTypes, nativeKeys, ' +
+        'propertyIsEnumerable, slice, stringClass, toString',
+      'var callee = function(' + args + ') {\n' + iteratorTemplate(data) + '\n};\n' +
+      'return callee'
     );
     // return the compiled function
     return factory(
-      arrayClass, bind, compareAscending, funcClass, hasOwnProperty, identity,
-      iteratorBind, objectTypes, nativeKeys, propertyIsEnumerable, slice,
-      stringClass, toString
+      arrayLikeClasses, ArrayProto, bind, compareAscending, concat, forIn,
+      hasOwnProperty, identity, indexOf, isArguments, isArray, isFunction,
+      isPlainObject, iteratorBind, objectClass, objectTypes, nativeKeys,
+      propertyIsEnumerable, slice, stringClass, toString
     );
   }
 
   /**
-   * Used by `sortBy` to compare transformed values of `collection`, sorting
+   * Used by `sortBy` to compare transformed `collection` values, stable sorting
    * them in ascending order.
    *
    * @private
    * @param {Object} a The object to compare to `b`.
    * @param {Object} b The object to compare to `a`.
-   * @returns {Number} Returns `-1` if `a` < `b`, `0` if `a` == `b`, or `1` if `a` > `b`.
+   * @returns {Number} Returns the sort order indicator of `1` or `-1`.
    */
   function compareAscending(a, b) {
+    var ai = a.index,
+        bi = b.index;
+
     a = a.criteria;
     b = b.criteria;
 
@@ -607,7 +758,9 @@
     if (b === undefined) {
       return -1;
     }
-    return a < b ? -1 : a > b ? 1 : 0;
+    // ensure a stable sort in V8 and other engines
+    // http://code.google.com/p/v8/issues/detail?id=90
+    return a < b ? -1 : a > b ? 1 : ai < bi ? -1 : 1;
   }
 
   /**
@@ -635,7 +788,7 @@
   }
 
   /**
-   * Used by `escape` to escape characters for inclusion in HTML.
+   * Used by `escape` to convert characters to HTML entities.
    *
    * @private
    * @param {String} match The matched character to escape.
@@ -670,21 +823,6 @@
   }
 
   /**
-   * A shim implementation of `Object.keys` that produces an array of the given
-   * object's own enumerable property names.
-   *
-   * @private
-   * @param {Object} object The object to inspect.
-   * @returns {Array} Returns a new array of property names.
-   */
-  var shimKeys = createIterator({
-    'args': 'object',
-    'exit': 'if (!(object && objectTypes[typeof object])) throw TypeError()',
-    'init': '[]',
-    'inLoop': 'result.push(index)'
-  });
-
-  /**
    * Used by `template` to replace "escape" template delimiters with tokens.
    *
    * @private
@@ -693,7 +831,7 @@
    * @returns {String} Returns a token.
    */
   function tokenizeEscape(match, value) {
-    if (reComplexDelimiter.test(value)) {
+    if (match && reComplexDelimiter.test(value)) {
       return '<e%-' + value + '%>';
     }
     var index = tokenized.length;
@@ -707,21 +845,20 @@
    *
    * @private
    * @param {String} match The matched template delimiter.
-   * @param {String} value The delimiter value.
-   * @param {String} escapeValue The "escape" delimiter value.
-   * @param {String} interpolateValue The "interpolate" delimiter value.
+   * @param {String} escapeValue The complex "escape" delimiter value.
+   * @param {String} interpolateValue The complex "interpolate" delimiter value.
+   * @param {String} [evaluateValue] The "evaluate" delimiter value.
    * @returns {String} Returns a token.
    */
-  function tokenizeEvaluate(match, value, escapeValue, interpolateValue) {
-    var index = tokenized.length;
-    if (value) {
-      tokenized[index] = "';\n" + value + ";\n__p += '"
-    } else if (escapeValue) {
-      tokenized[index] = "' +\n__e(" + escapeValue + ") +\n'";
-    } else if (interpolateValue) {
-      tokenized[index] = "' +\n((__t = (" + interpolateValue + ")) == null ? '' : __t) +\n'";
+  function tokenizeEvaluate(match, escapeValue, interpolateValue, evaluateValue) {
+    if (evaluateValue) {
+      var index = tokenized.length;
+      tokenized[index] = "';\n" + evaluateValue + ";\n__p += '";
+      return token + index;
     }
-    return token + index;
+    return escapeValue
+      ? tokenizeEscape(null, escapeValue)
+      : tokenizeInterpolate(null, interpolateValue);
   }
 
   /**
@@ -733,7 +870,7 @@
    * @returns {String} Returns a token.
    */
   function tokenizeInterpolate(match, value) {
-    if (reComplexDelimiter.test(value)) {
+    if (match && reComplexDelimiter.test(value)) {
       return '<e%=' + value + '%>';
     }
     var index = tokenized.length;
@@ -741,10 +878,1066 @@
     return token + index;
   }
 
+  /**
+   * Used by `unescape` to convert HTML entities to characters.
+   *
+   * @private
+   * @param {String} match The matched character to unescape.
+   * @returns {String} Returns the unescaped character.
+   */
+  function unescapeHtmlChar(match) {
+    return htmlUnescapes[match];
+  }
+
   /*--------------------------------------------------------------------------*/
 
   /**
-   * Checks if a given `target` value is present in a `collection` using strict
+   * Checks if `value` is an `arguments` object.
+   *
+   * @static
+   * @memberOf _
+   * @category Objects
+   * @param {Mixed} value The value to check.
+   * @returns {Boolean} Returns `true` if the `value` is an `arguments` object, else `false`.
+   * @example
+   *
+   * (function() { return _.isArguments(arguments); })(1, 2, 3);
+   * // => true
+   *
+   * _.isArguments([1, 2, 3]);
+   * // => false
+   */
+  function isArguments(value) {
+    return toString.call(value) == argsClass;
+  }
+  // fallback for browsers that can't detect `arguments` objects by [[Class]]
+  if (noArgsClass) {
+    isArguments = function(value) {
+      return !!(value && hasOwnProperty.call(value, 'callee'));
+    };
+  }
+
+  /**
+   * Checks if `value` is an array.
+   *
+   * @static
+   * @memberOf _
+   * @category Objects
+   * @param {Mixed} value The value to check.
+   * @returns {Boolean} Returns `true` if the `value` is an array, else `false`.
+   * @example
+   *
+   * (function() { return _.isArray(arguments); })();
+   * // => false
+   *
+   * _.isArray([1, 2, 3]);
+   * // => true
+   */
+  var isArray = nativeIsArray || function(value) {
+    return toString.call(value) == arrayClass;
+  };
+
+  /**
+   * Checks if `value` is a function.
+   *
+   * @static
+   * @memberOf _
+   * @category Objects
+   * @param {Mixed} value The value to check.
+   * @returns {Boolean} Returns `true` if the `value` is a function, else `false`.
+   * @example
+   *
+   * _.isFunction(''.concat);
+   * // => true
+   */
+  function isFunction(value) {
+    return typeof value == 'function';
+  }
+  // fallback for older versions of Chrome and Safari
+  if (isFunction(/x/)) {
+    isFunction = function(value) {
+      return toString.call(value) == funcClass;
+    };
+  }
+
+  /**
+   * Checks if a given `value` is an object created by the `Object` constructor
+   * assuming objects created by the `Object` constructor have no inherited
+   * enumerable properties and that there are no `Object.prototype` extensions.
+   *
+   * @private
+   * @param {Mixed} value The value to check.
+   * @param {Boolean} [skipArgsCheck=false] Internally used to skip checks for
+   *  `arguments` objects.
+   * @returns {Boolean} Returns `true` if the `value` is a plain `Object` object,
+   *  else `false`.
+   */
+  function isPlainObject(value, skipArgsCheck) {
+    return value
+      ? value == ObjectProto || (value.__proto__ == ObjectProto && (skipArgsCheck || !isArguments(value)))
+      : false;
+  }
+  // fallback for IE
+  if (!isPlainObject(objectTypes)) {
+    isPlainObject = function(value, skipArgsCheck) {
+      // avoid non-objects and false positives for `arguments` objects
+      var result = false;
+      if (!(value && typeof value == 'object') || (!skipArgsCheck && isArguments(value))) {
+        return result;
+      }
+      // IE < 9 presents DOM nodes as `Object` objects except they have `toString`
+      // methods that are `typeof` "string" and still can coerce nodes to strings.
+      // Also check that the constructor is `Object` (i.e. `Object instanceof Object`)
+      var ctor = value.constructor;
+      if ((!noNodeClass || !(typeof value.toString != 'function' && typeof (value + '') == 'string')) &&
+          (!isFunction(ctor) || ctor instanceof ctor)) {
+        // IE < 9 iterates inherited properties before own properties. If the first
+        // iterated property is an object's own property then there are no inherited
+        // enumerable properties.
+        if (iteratesOwnLast) {
+          forIn(value, function(objValue, objKey) {
+            result = !hasOwnProperty.call(value, objKey);
+            return false;
+          });
+          return result === false;
+        }
+        // In most environments an object's own properties are iterated before
+        // its inherited properties. If the last iterated property is an object's
+        // own property then there are no inherited enumerable properties.
+        forIn(value, function(objValue, objKey) {
+          result = objKey;
+        });
+        return result === false || hasOwnProperty.call(value, result);
+      }
+      return result;
+    };
+  }
+
+  /**
+   * A shim implementation of `Object.keys` that produces an array of the given
+   * object's own enumerable property names.
+   *
+   * @private
+   * @param {Object} object The object to inspect.
+   * @returns {Array} Returns a new array of property names.
+   */
+  var shimKeys = createIterator({
+    'args': 'object',
+    'init': '[]',
+    'inLoop': 'result.push(index)'
+  });
+
+  /*--------------------------------------------------------------------------*/
+
+  /**
+   * Creates a clone of `value`. If `deep` is `true`, all nested objects will
+   * also be cloned otherwise they will be assigned by reference. If a value has
+   * a `clone` method it will be used to perform the clone. Functions, DOM nodes,
+   * `arguments` objects, and objects created by constructors other than `Object`
+   * are **not** cloned unless they have a custom `clone` method.
+   *
+   * @static
+   * @memberOf _
+   * @category Objects
+   * @param {Mixed} value The value to clone.
+   * @param {Boolean} deep A flag to indicate a deep clone.
+   * @param {Object} [guard] Internally used to allow this method to work with
+   *  others like `_.map` without using their callback `index` argument for `deep`.
+   * @param {Array} [stack=[]] Internally used to keep track of traversed objects
+   *  to avoid circular references.
+   * @param {Object} thorough Internally used to indicate whether or not to perform
+   *  a more thorough clone of non-object values.
+   * @returns {Mixed} Returns the cloned `value`.
+   * @example
+   *
+   * var stooges = [
+   *   { 'name': 'moe', 'age': 40 },
+   *   { 'name': 'larry', 'age': 50 },
+   *   { 'name': 'curly', 'age': 60 }
+   * ];
+   *
+   * _.clone({ 'name': 'moe' });
+   * // => { 'name': 'moe' }
+   *
+   * var shallow = _.clone(stooges);
+   * shallow[0] === stooges[0];
+   * // => true
+   *
+   * var deep = _.clone(stooges, true);
+   * shallow[0] === stooges[0];
+   * // => false
+   */
+  function clone(value, deep, guard, stack, thorough) {
+    if (value == null) {
+      return value;
+    }
+    if (guard) {
+      deep = false;
+    }
+    // avoid slower checks on primitives
+    thorough || (thorough = { 'value': null });
+    if (thorough.value == null) {
+      // primitives passed from iframes use the primary document's native prototypes
+      thorough.value = !!(BoolProto.clone || NumberProto.clone || StringProto.clone);
+    }
+    // use custom `clone` method if available
+    var isObj = objectTypes[typeof value];
+    if ((isObj || thorough.value) && value.clone && isFunction(value.clone)) {
+      thorough.value = null;
+      return value.clone(deep);
+    }
+    // inspect [[Class]]
+    if (isObj) {
+      // don't clone `arguments` objects, functions, or non-object Objects
+      var className = toString.call(value);
+      if (!cloneableClasses[className] || (noArgsClass && isArguments(value))) {
+        return value;
+      }
+      var isArr = className == arrayClass;
+      isObj = isArr || (className == objectClass ? isPlainObject(value, true) : isObj);
+    }
+    // shallow clone
+    if (!isObj || !deep) {
+      // don't clone functions
+      return isObj
+        ? (isArr ? slice.call(value) : extend({}, value))
+        : value;
+    }
+
+    var ctor = value.constructor;
+    switch (className) {
+      case boolClass:
+        return new ctor(value == true);
+
+      case dateClass:
+        return new ctor(+value);
+
+      case numberClass:
+      case stringClass:
+        return new ctor(value);
+
+      case regexpClass:
+        return ctor(value.source, reFlags.exec(value));
+    }
+
+    // check for circular references and return corresponding clone
+    stack || (stack = []);
+    var length = stack.length;
+    while (length--) {
+      if (stack[length].source == value) {
+        return stack[length].value;
+      }
+    }
+
+    // init cloned object
+    length = value.length;
+    var result = isArr ? ctor(length) : {};
+
+    // add current clone and original source value to the stack of traversed objects
+    stack.push({ 'value': result, 'source': value });
+
+    // recursively populate clone (susceptible to call stack limits)
+    if (isArr) {
+      var index = -1;
+      while (++index < length) {
+        result[index] = clone(value[index], deep, null, stack, thorough);
+      }
+    } else {
+      forOwn(value, function(objValue, key) {
+        result[key] = clone(objValue, deep, null, stack, thorough);
+      });
+    }
+    return result;
+  }
+
+  /**
+   * Assigns enumerable properties of the default object(s) to the `destination`
+   * object for all `destination` properties that resolve to `null`/`undefined`.
+   * Once a property is set, additional defaults of the same property will be
+   * ignored.
+   *
+   * @static
+   * @memberOf _
+   * @category Objects
+   * @param {Object} object The destination object.
+   * @param {Object} [default1, default2, ...] The default objects.
+   * @returns {Object} Returns the destination object.
+   * @example
+   *
+   * var iceCream = { 'flavor': 'chocolate' };
+   * _.defaults(iceCream, { 'flavor': 'vanilla', 'sprinkles': 'rainbow' });
+   * // => { 'flavor': 'chocolate', 'sprinkles': 'rainbow' }
+   */
+  var defaults = createIterator(extendIteratorOptions, {
+    'inLoop': 'if (result[index] == null) ' + extendIteratorOptions.inLoop
+  });
+
+  /**
+   * Creates a shallow clone of `object` excluding the specified properties.
+   * Property names may be specified as individual arguments or as arrays of
+   * property names. If `callback` is passed, it will be executed for each property
+   * in the `object`, dropping the properties `callback` returns truthy for. The
+   * `callback` is bound to `thisArg` and invoked with 3 arguments; (value, key, object).
+   *
+   * @static
+   * @memberOf _
+   * @alias omit
+   * @category Objects
+   * @param {Object} object The source object.
+   * @param {Function|String} callback|[prop1, prop2, ...] The properties to drop
+   *  or the function called per iteration.
+   * @param {Mixed} [thisArg] The `this` binding for the callback.
+   * @returns {Object} Returns an object without the dropped properties.
+   * @example
+   *
+   * _.drop({ 'name': 'moe', 'age': 40, 'userid': 'moe1' }, 'userid');
+   * // => { 'name': 'moe', 'age': 40 }
+   *
+   * _.drop({ 'name': 'moe', '_hint': 'knucklehead', '_seed': '96c4eb' }, function(value, key) {
+   *   return key.charAt(0) == '_';
+   * });
+   * // => { 'name': 'moe' }
+   */
+  var drop = createIterator(dropIteratorOptions);
+
+  /**
+   * Assigns enumerable properties of the source object(s) to the `destination`
+   * object. Subsequent sources will overwrite propery assignments of previous
+   * sources.
+   *
+   * @static
+   * @memberOf _
+   * @category Objects
+   * @param {Object} object The destination object.
+   * @param {Object} [source1, source2, ...] The source objects.
+   * @returns {Object} Returns the destination object.
+   * @example
+   *
+   * _.extend({ 'name': 'moe' }, { 'age': 40 });
+   * // => { 'name': 'moe', 'age': 40 }
+   */
+  var extend = createIterator(extendIteratorOptions);
+
+  /**
+   * Iterates over `object`'s own and inherited enumerable properties, executing
+   * the `callback` for each property. The `callback` is bound to `thisArg` and
+   * invoked with 3 arguments; (value, key, object). Callbacks may exit iteration
+   * early by explicitly returning `false`.
+   *
+   * @static
+   * @memberOf _
+   * @category Objects
+   * @param {Object} object The object to iterate over.
+   * @param {Function} callback The function called per iteration.
+   * @param {Mixed} [thisArg] The `this` binding for the callback.
+   * @returns {Object} Returns `object`.
+   * @example
+   *
+   * function Dog(name) {
+   *   this.name = name;
+   * }
+   *
+   * Dog.prototype.bark = function() {
+   *   alert('Woof, woof!');
+   * };
+   *
+   * _.forIn(new Dog('Dagny'), function(value, key) {
+   *   alert(key);
+   * });
+   * // => alerts 'name' and 'bark' (order is not guaranteed)
+   */
+  var forIn = createIterator(baseIteratorOptions, forEachIteratorOptions, forOwnIteratorOptions, {
+    'useHas': false
+  });
+
+  /**
+   * Iterates over `object`'s own enumerable properties, executing the `callback`
+   * for each property. The `callback` is bound to `thisArg` and invoked with 3
+   * arguments; (value, key, object). Callbacks may exit iteration early by
+   * explicitly returning `false`.
+   *
+   * @static
+   * @memberOf _
+   * @category Objects
+   * @param {Object} object The object to iterate over.
+   * @param {Function} callback The function called per iteration.
+   * @param {Mixed} [thisArg] The `this` binding for the callback.
+   * @returns {Object} Returns `object`.
+   * @example
+   *
+   * _.forOwn({ '0': 'zero', '1': 'one', 'length': 2 }, function(num, key) {
+   *   alert(key);
+   * });
+   * // => alerts '0', '1', and 'length' (order is not guaranteed)
+   */
+  var forOwn = createIterator(baseIteratorOptions, forEachIteratorOptions, forOwnIteratorOptions);
+
+  /**
+   * Creates a sorted array of all enumerable properties, own and inherited,
+   * of `object` that have function values.
+   *
+   * @static
+   * @memberOf _
+   * @alias methods
+   * @category Objects
+   * @param {Object} object The object to inspect.
+   * @returns {Array} Returns a new array of property names that have function values.
+   * @example
+   *
+   * _.functions(_);
+   * // => ['all', 'any', 'bind', 'bindAll', 'clone', 'compact', 'compose', ...]
+   */
+  var functions = createIterator({
+    'useHas': false,
+    'args': 'object',
+    'init': '[]',
+    'inLoop': 'if (isFunction(value)) result.push(index)',
+    'bottom': 'result.sort()'
+  });
+
+  /**
+   * Checks if the specified object `property` exists and is a direct property,
+   * instead of an inherited property.
+   *
+   * @static
+   * @memberOf _
+   * @category Objects
+   * @param {Object} object The object to check.
+   * @param {String} property The property to check for.
+   * @returns {Boolean} Returns `true` if key is a direct property, else `false`.
+   * @example
+   *
+   * _.has({ 'a': 1, 'b': 2, 'c': 3 }, 'b');
+   * // => true
+   */
+  function has(object, property) {
+    return object ? hasOwnProperty.call(object, property) : false;
+  }
+
+  /**
+   * Checks if `value` is a boolean (`true` or `false`) value.
+   *
+   * @static
+   * @memberOf _
+   * @category Objects
+   * @param {Mixed} value The value to check.
+   * @returns {Boolean} Returns `true` if the `value` is a boolean value, else `false`.
+   * @example
+   *
+   * _.isBoolean(null);
+   * // => false
+   */
+  function isBoolean(value) {
+    return value === true || value === false || toString.call(value) == boolClass;
+  }
+
+  /**
+   * Checks if `value` is a date.
+   *
+   * @static
+   * @memberOf _
+   * @category Objects
+   * @param {Mixed} value The value to check.
+   * @returns {Boolean} Returns `true` if the `value` is a date, else `false`.
+   * @example
+   *
+   * _.isDate(new Date);
+   * // => true
+   */
+  function isDate(value) {
+    return toString.call(value) == dateClass;
+  }
+
+  /**
+   * Checks if `value` is a DOM element.
+   *
+   * @static
+   * @memberOf _
+   * @category Objects
+   * @param {Mixed} value The value to check.
+   * @returns {Boolean} Returns `true` if the `value` is a DOM element, else `false`.
+   * @example
+   *
+   * _.isElement(document.body);
+   * // => true
+   */
+  function isElement(value) {
+    return value ? value.nodeType === 1 : false;
+  }
+
+  /**
+   * Checks if `value` is empty. Arrays, strings, or `arguments` objects with a
+   * length of `0` and objects with no own enumerable properties are considered
+   * "empty".
+   *
+   * @static
+   * @memberOf _
+   * @category Objects
+   * @param {Array|Object|String} value The value to inspect.
+   * @returns {Boolean} Returns `true` if the `value` is empty, else `false`.
+   * @example
+   *
+   * _.isEmpty([1, 2, 3]);
+   * // => false
+   *
+   * _.isEmpty({});
+   * // => true
+   *
+   * _.isEmpty('');
+   * // => true
+   */
+  var isEmpty = createIterator({
+    'args': 'value',
+    'init': 'true',
+    'top':
+      'var className = toString.call(value),\n' +
+      '    length = value.length;\n' +
+      'if (arrayLikeClasses[className]' +
+      (noArgsClass ? ' || isArguments(value)' : '') + ' ||\n' +
+      '  (className == objectClass && length > -1 && length === length >>> 0 &&\n' +
+      '  isFunction(value.splice))' +
+      ') return !length',
+    'inLoop': {
+      'object': 'return false'
+    }
+  });
+
+  /**
+   * Performs a deep comparison between two values to determine if they are
+   * equivalent to each other. If a value has an `isEqual` method it will be
+   * used to perform the comparison.
+   *
+   * @static
+   * @memberOf _
+   * @category Objects
+   * @param {Mixed} a The value to compare.
+   * @param {Mixed} b The other value to compare.
+   * @param {Array} [stack=[]] Internally used to keep track of traversed objects
+   *  to avoid circular references.
+   * @param {Object} thorough Internally used to indicate whether or not to perform
+   *  a more thorough comparison of non-object values.
+   * @returns {Boolean} Returns `true` if the values are equvalent, else `false`.
+   * @example
+   *
+   * var moe = { 'name': 'moe', 'luckyNumbers': [13, 27, 34] };
+   * var clone = { 'name': 'moe', 'luckyNumbers': [13, 27, 34] };
+   *
+   * moe == clone;
+   * // => false
+   *
+   * _.isEqual(moe, clone);
+   * // => true
+   */
+  function isEqual(a, b, stack, thorough) {
+    // a strict comparison is necessary because `null == undefined`
+    if (a == null || b == null) {
+      return a === b;
+    }
+    // avoid slower checks on non-objects
+    thorough || (thorough = { 'value': null });
+    if (thorough.value == null) {
+      // primitives passed from iframes use the primary document's native prototypes
+      thorough.value = !!(BoolProto.isEqual || NumberProto.isEqual || StringProto.isEqual);
+    }
+    if (objectTypes[typeof a] || objectTypes[typeof b] || thorough.value) {
+      // unwrap any LoDash wrapped values
+      if (a._chain) {
+        a = a._wrapped;
+      }
+      if (b._chain) {
+        b = b._wrapped;
+      }
+      // use custom `isEqual` method if available
+      if (a.isEqual && isFunction(a.isEqual)) {
+        thorough.value = null;
+        return a.isEqual(b);
+      }
+      if (b.isEqual && isFunction(b.isEqual)) {
+        thorough.value = null;
+        return b.isEqual(a);
+      }
+    }
+    // exit early for identical values
+    if (a === b) {
+      // treat `+0` vs. `-0` as not equal
+      return a !== 0 || (1 / a == 1 / b);
+    }
+    // compare [[Class]] names
+    var className = toString.call(a);
+    if (className != toString.call(b)) {
+      return false;
+    }
+    switch (className) {
+      case boolClass:
+      case dateClass:
+        // coerce dates and booleans to numbers, dates to milliseconds and booleans
+        // to `1` or `0`, treating invalid dates coerced to `NaN` as not equal
+        return +a == +b;
+
+      case numberClass:
+        // treat `NaN` vs. `NaN` as equal
+        return a != +a
+          ? b != +b
+          // but treat `+0` vs. `-0` as not equal
+          : (a == 0 ? (1 / a == 1 / b) : a == +b);
+
+      case regexpClass:
+      case stringClass:
+        // coerce regexes to strings (http://es5.github.com/#x15.10.6.4)
+        // treat string primitives and their corresponding object instances as equal
+        return a == b + '';
+    }
+    // exit early, in older browsers, if `a` is array-like but not `b`
+    var isArr = arrayLikeClasses[className];
+    if (noArgsClass && !isArr && (isArr = isArguments(a)) && !isArguments(b)) {
+      return false;
+    }
+    // exit for functions and DOM nodes
+    if (!isArr && (className != objectClass || (noNodeClass && (
+        (typeof a.toString != 'function' && typeof (a + '') == 'string') ||
+        (typeof b.toString != 'function' && typeof (b + '') == 'string'))))) {
+      return false;
+    }
+
+    // assume cyclic structures are equal
+    // the algorithm for detecting cyclic structures is adapted from ES 5.1
+    // section 15.12.3, abstract operation `JO` (http://es5.github.com/#x15.12.3)
+    stack || (stack = []);
+    var length = stack.length;
+    while (length--) {
+      if (stack[length] == a) {
+        return true;
+      }
+    }
+
+    var index = -1,
+        result = true,
+        size = 0;
+
+    // add `a` to the stack of traversed objects
+    stack.push(a);
+
+    // recursively compare objects and arrays (susceptible to call stack limits)
+    if (isArr) {
+      // compare lengths to determine if a deep comparison is necessary
+      size = a.length;
+      result = size == b.length;
+
+      if (result) {
+        // deep compare the contents, ignoring non-numeric properties
+        while (size--) {
+          if (!(result = isEqual(a[size], b[size], stack, thorough))) {
+            break;
+          }
+        }
+      }
+      return result;
+    }
+
+    var ctorA = a.constructor,
+        ctorB = b.constructor;
+
+    // non `Object` object instances with different constructors are not equal
+    if (ctorA != ctorB && !(
+          isFunction(ctorA) && ctorA instanceof ctorA &&
+          isFunction(ctorB) && ctorB instanceof ctorB
+        )) {
+      return false;
+    }
+    // deep compare objects
+    for (var prop in a) {
+      if (hasOwnProperty.call(a, prop)) {
+        // count the number of properties.
+        size++;
+        // deep compare each property value.
+        if (!(hasOwnProperty.call(b, prop) && isEqual(a[prop], b[prop], stack, thorough))) {
+          return false;
+        }
+      }
+    }
+    // ensure both objects have the same number of properties
+    for (prop in b) {
+      // The JS engine in Adobe products, like InDesign, has a bug that causes
+      // `!size--` to throw an error so it must be wrapped in parentheses.
+      // https://github.com/documentcloud/underscore/issues/355
+      if (hasOwnProperty.call(b, prop) && !(size--)) {
+        // `size` will be `-1` if `b` has more properties than `a`
+        return false;
+      }
+    }
+    // handle JScript [[DontEnum]] bug
+    if (hasDontEnumBug) {
+      while (++index < 7) {
+        prop = shadowed[index];
+        if (hasOwnProperty.call(a, prop) &&
+            !(hasOwnProperty.call(b, prop) && isEqual(a[prop], b[prop], stack, thorough))) {
+          return false;
+        }
+      }
+    }
+    return true;
+  }
+
+  /**
+   * Checks if `value` is a finite number.
+   *
+   * Note: This is not the same as native `isFinite`, which will return true for
+   * booleans and other values. See http://es5.github.com/#x15.1.2.5.
+   *
+   * @deprecated
+   * @static
+   * @memberOf _
+   * @category Objects
+   * @param {Mixed} value The value to check.
+   * @returns {Boolean} Returns `true` if the `value` is a finite number, else `false`.
+   * @example
+   *
+   * _.isFinite(-101);
+   * // => true
+   *
+   * _.isFinite('10');
+   * // => false
+   *
+   * _.isFinite(Infinity);
+   * // => false
+   */
+  function isFinite(value) {
+    return nativeIsFinite(value) && toString.call(value) == numberClass;
+  }
+
+  /**
+   * Checks if `value` is the language type of Object.
+   * (e.g. arrays, functions, objects, regexes, `new Number(0)`, and `new String('')`)
+   *
+   * @static
+   * @memberOf _
+   * @category Objects
+   * @param {Mixed} value The value to check.
+   * @returns {Boolean} Returns `true` if the `value` is an object, else `false`.
+   * @example
+   *
+   * _.isObject({});
+   * // => true
+   *
+   * _.isObject(1);
+   * // => false
+   */
+  function isObject(value) {
+    // check if the value is the ECMAScript language type of Object
+    // http://es5.github.com/#x8
+    // and avoid a V8 bug
+    // http://code.google.com/p/v8/issues/detail?id=2291
+    return value ? objectTypes[typeof value] : false;
+  }
+
+  /**
+   * Checks if `value` is `NaN`.
+   *
+   * Note: This is not the same as native `isNaN`, which will return true for
+   * `undefined` and other values. See http://es5.github.com/#x15.1.2.4.
+   *
+   * @deprecated
+   * @static
+   * @memberOf _
+   * @category Objects
+   * @param {Mixed} value The value to check.
+   * @returns {Boolean} Returns `true` if the `value` is `NaN`, else `false`.
+   * @example
+   *
+   * _.isNaN(NaN);
+   * // => true
+   *
+   * _.isNaN(new Number(NaN));
+   * // => true
+   *
+   * isNaN(undefined);
+   * // => true
+   *
+   * _.isNaN(undefined);
+   * // => false
+   */
+  function isNaN(value) {
+    // `NaN` as a primitive is the only value that is not equal to itself
+    // (perform the [[Class]] check first to avoid errors with some host objects in IE)
+    return toString.call(value) == numberClass && value != +value
+  }
+
+  /**
+   * Checks if `value` is `null`.
+   *
+   * @deprecated
+   * @static
+   * @memberOf _
+   * @category Objects
+   * @param {Mixed} value The value to check.
+   * @returns {Boolean} Returns `true` if the `value` is `null`, else `false`.
+   * @example
+   *
+   * _.isNull(null);
+   * // => true
+   *
+   * _.isNull(undefined);
+   * // => false
+   */
+  function isNull(value) {
+    return value === null;
+  }
+
+  /**
+   * Checks if `value` is a number.
+   *
+   * @static
+   * @memberOf _
+   * @category Objects
+   * @param {Mixed} value The value to check.
+   * @returns {Boolean} Returns `true` if the `value` is a number, else `false`.
+   * @example
+   *
+   * _.isNumber(8.4 * 5;
+   * // => true
+   */
+  function isNumber(value) {
+    return toString.call(value) == numberClass;
+  }
+
+  /**
+   * Checks if `value` is a regular expression.
+   *
+   * @static
+   * @memberOf _
+   * @category Objects
+   * @param {Mixed} value The value to check.
+   * @returns {Boolean} Returns `true` if the `value` is a regular expression, else `false`.
+   * @example
+   *
+   * _.isRegExp(/moe/);
+   * // => true
+   */
+  function isRegExp(value) {
+    return toString.call(value) == regexpClass;
+  }
+
+  /**
+   * Checks if `value` is a string.
+   *
+   * @static
+   * @memberOf _
+   * @category Objects
+   * @param {Mixed} value The value to check.
+   * @returns {Boolean} Returns `true` if the `value` is a string, else `false`.
+   * @example
+   *
+   * _.isString('moe');
+   * // => true
+   */
+  function isString(value) {
+    return toString.call(value) == stringClass;
+  }
+
+  /**
+   * Checks if `value` is `undefined`.
+   *
+   * @deprecated
+   * @static
+   * @memberOf _
+   * @category Objects
+   * @param {Mixed} value The value to check.
+   * @returns {Boolean} Returns `true` if the `value` is `undefined`, else `false`.
+   * @example
+   *
+   * _.isUndefined(void 0);
+   * // => true
+   */
+  function isUndefined(value) {
+    return value === undefined;
+  }
+
+  /**
+   * Creates an array composed of the own enumerable property names of `object`.
+   *
+   * @static
+   * @memberOf _
+   * @category Objects
+   * @param {Object} object The object to inspect.
+   * @returns {Array} Returns a new array of property names.
+   * @example
+   *
+   * _.keys({ 'one': 1, 'two': 2, 'three': 3 });
+   * // => ['one', 'two', 'three'] (order is not guaranteed)
+   */
+  var keys = !nativeKeys ? shimKeys : function(object) {
+    var type = typeof object;
+
+    // avoid iterating over the `prototype` property
+    if (type == 'function' && propertyIsEnumerable.call(object, 'prototype')) {
+      return shimKeys(object);
+    }
+    return object && objectTypes[type]
+      ? nativeKeys(object)
+      : [];
+  };
+
+  /**
+   * Merges enumerable properties of the source object(s) into the `destination`
+   * object. Subsequent sources will overwrite propery assignments of previous
+   * sources.
+   *
+   * @static
+   * @memberOf _
+   * @category Objects
+   * @param {Object} object The destination object.
+   * @param {Object} [source1, source2, ...] The source objects.
+   * @param {Object} [indicator] Internally used to indicate that the `stack`
+   *  argument is an array of traversed objects instead of another source object.
+   * @param {Array} [stack=[]] Internally used to keep track of traversed objects
+   *  to avoid circular references.
+   * @returns {Object} Returns the destination object.
+   * @example
+   *
+   * var stooges = [
+   *   { 'name': 'moe' },
+   *   { 'name': 'larry' }
+   * ];
+   *
+   * var ages = [
+   *   { 'age': 40 },
+   *   { 'age': 50 }
+   * ];
+   *
+   * _.merge(stooges, ages);
+   * // => [{ 'name': 'moe', 'age': 40 }, { 'name': 'larry', 'age': 50 }]
+   */
+  var merge = createIterator(extendIteratorOptions, {
+    'args': 'object, source, indicator, stack',
+    'top':
+      'var destValue, found, isArr, stackLength, recursive = indicator == isPlainObject;\n' +
+      'if (!recursive) stack = [];\n' +
+      'for (var argsIndex = 1, argsLength = recursive ? 2 : arguments.length; argsIndex < argsLength; argsIndex++) {\n' +
+      '  if (iteratee = arguments[argsIndex]) {',
+    'inLoop':
+      'if (value && ((isArr = isArray(value)) || isPlainObject(value))) {\n' +
+      '  found = false; stackLength = stack.length;\n' +
+      '  while (stackLength--) {\n' +
+      '    if (found = stack[stackLength].source == value) break\n' +
+      '  }\n' +
+      '  if (found) {\n' +
+      '    result[index] = stack[stackLength].value\n' +
+      '  } else {\n' +
+      '    destValue = (destValue = result[index]) && isArr\n' +
+      '      ? (isArray(destValue) ? destValue : [])\n' +
+      '      : (isPlainObject(destValue) ? destValue : {});\n' +
+      '    stack.push({ value: destValue, source: value });\n' +
+      '    result[index] = callee(destValue, value, isPlainObject, stack)\n' +
+      '  }\n' +
+      '} else if (value != null) {\n' +
+      '  result[index] = value\n' +
+      '}'
+  });
+
+  /**
+   * Creates a shallow clone of `object` composed of the specified properties.
+   * Property names may be specified as individual arguments or as arrays of
+   * property names. If `callback` is passed, it will be executed for each property
+   * in the `object`, picking the properties `callback` returns truthy for. The
+   * `callback` is bound to `thisArg` and invoked with 3 arguments; (value, key, object).
+   *
+   * @static
+   * @memberOf _
+   * @category Objects
+   * @param {Object} object The source object.
+   * @param {Function|String} callback|[prop1, prop2, ...] The properties to pick
+   *  or the function called per iteration.
+   * @param {Mixed} [thisArg] The `this` binding for the callback.
+   * @returns {Object} Returns an object composed of the picked properties.
+   * @example
+   *
+   * _.pick({ 'name': 'moe', 'age': 40, 'userid': 'moe1' }, 'name', 'age');
+   * // => { 'name': 'moe', 'age': 40 }
+   *
+   * _.pick({ 'name': 'moe', '_hint': 'knucklehead', '_seed': '96c4eb' }, function(value, key) {
+   *   return key.charAt(0) != '_';
+   * });
+   * // => { 'name': 'moe' }
+   */
+  var pick = createIterator(dropIteratorOptions, {
+    'top':
+      'if (typeof callback != \'function\') {\n' +
+      '  var prop,\n' +
+      '      props = concat.apply(ArrayProto, arguments),\n' +
+      '      length = props.length;\n' +
+      '  for (index = 1; index < length; index++) {\n' +
+      '    prop = props[index];\n' +
+      '    if (prop in object) result[prop] = object[prop]\n' +
+      '  }\n' +
+      '} else {\n' +
+      '  if (thisArg) callback = iteratorBind(callback, thisArg)',
+    'inLoop':
+      'if (callback(value, index, object)) result[index] = value',
+    'bottom': '}'
+  });
+
+  /**
+   * Gets the size of `value` by returning `value.length` if `value` is an
+   * array, string, or `arguments` object. If `value` is an object, size is
+   * determined by returning the number of own enumerable properties it has.
+   *
+   * @static
+   * @memberOf _
+   * @category Objects
+   * @param {Array|Object|String} value The value to inspect.
+   * @returns {Number} Returns `value.length` or number of own enumerable properties.
+   * @example
+   *
+   * _.size([1, 2]);
+   * // => 2
+   *
+   * _.size({ 'one': 1, 'two': 2, 'three': 3 });
+   * // => 3
+   *
+   * _.size('curly');
+   * // => 5
+   */
+  function size(value) {
+    if (!value) {
+      return 0;
+    }
+    var className = toString.call(value),
+        length = value.length;
+
+    // return `value.length` for `arguments` objects, arrays, strings, and DOM
+    // query collections of libraries like jQuery and MooTools
+    // http://code.google.com/p/fbug/source/browse/branches/firebug1.9/content/firebug/chrome/reps.js?r=12614#653
+    // http://trac.webkit.org/browser/trunk/Source/WebCore/inspector/InjectedScriptSource.js?rev=125186#L609
+    if (arrayLikeClasses[className] || (noArgsClass && isArguments(value)) ||
+        (className == objectClass && length > -1 && length === length >>> 0 && isFunction(value.splice))) {
+      return length;
+    }
+    return keys(value).length;
+  }
+
+  /**
+   * Creates an array composed of the own enumerable property values of `object`.
+   *
+   * @static
+   * @memberOf _
+   * @category Objects
+   * @param {Object} object The object to inspect.
+   * @returns {Array} Returns a new array of property values.
+   * @example
+   *
+   * _.values({ 'one': 1, 'two': 2, 'three': 3 });
+   * // => [1, 2, 3]
+   */
+  var values = createIterator({
+    'args': 'object',
+    'init': '[]',
+    'inLoop': 'result.push(value)'
+  });
+
+  /*--------------------------------------------------------------------------*/
+
+  /**
+   * Checks if a given `target` element is present in a `collection` using strict
    * equality for comparisons, i.e. `===`.
    *
    * @static
@@ -753,7 +1946,7 @@
    * @category Collections
    * @param {Array|Object|String} collection The collection to iterate over.
    * @param {Mixed} target The value to check for.
-   * @returns {Boolean} Returns `true` if `target` value is found, else `false`.
+   * @returns {Boolean} Returns `true` if the `target` element is found, else `false`.
    * @example
    *
    * _.contains([1, 2, 3], 3);
@@ -770,10 +1963,38 @@
     'init': 'false',
     'noCharByIndex': false,
     'beforeLoop': {
-      'array': 'if (toString.call(iteratee) == stringClass) return collection.indexOf(target) > -1'
+      'array': 'if (toString.call(collection) == stringClass) return collection.indexOf(target) > -1'
     },
-    'inLoop': 'if (iteratee[index] === target) return true'
+    'inLoop': 'if (value === target) return true'
   });
+
+  /**
+   * Creates an object composed of keys returned from running each element of
+   * `collection` through a `callback`. The corresponding value of each key is
+   * the number of times the key was returned by `callback`. The `callback` is
+   * bound to `thisArg` and invoked with 3 arguments; (value, index|key, collection).
+   * The `callback` argument may also be the name of a property to count by (e.g. 'length').
+   *
+   * @static
+   * @memberOf _
+   * @category Collections
+   * @param {Array|Object|String} collection The collection to iterate over.
+   * @param {Function|String} callback|property The function called per iteration
+   *  or property name to count by.
+   * @param {Mixed} [thisArg] The `this` binding for the callback.
+   * @returns {Object} Returns the composed aggregate object.
+   * @example
+   *
+   * _.countBy([4.3, 6.1, 6.4], function(num) { return Math.floor(num); });
+   * // => { '4': 1, '6': 2 }
+   *
+   * _.countBy([4.3, 6.1, 6.4], function(num) { return this.floor(num); }, Math);
+   * // => { '4': 1, '6': 2 }
+   *
+   * _.countBy(['one', 'two', 'three'], 'length');
+   * // => { '3': 2, '5': 1 }
+   */
+  var countBy = createIterator(baseIteratorOptions, countByIteratorOptions);
 
   /**
    * Checks if the `callback` returns a truthy value for **all** elements of a
@@ -787,7 +2008,7 @@
    * @param {Array|Object|String} collection The collection to iterate over.
    * @param {Function} [callback=identity] The function called per iteration.
    * @param {Mixed} [thisArg] The `this` binding for the callback.
-   * @returns {Boolean} Returns `true` if all values pass the callback check, else `false`.
+   * @returns {Boolean} Returns `true` if all elements pass the callback check, else `false`.
    * @example
    *
    * _.every([true, 1, null, 'yes'], Boolean);
@@ -796,8 +2017,8 @@
   var every = createIterator(baseIteratorOptions, everyIteratorOptions);
 
   /**
-   * Examines each value in a `collection`, returning an array of all values the
-   * `callback` returns truthy for. The `callback` is bound to `thisArg` and
+   * Examines each element in a `collection`, returning an array of all elements
+   * the `callback` returns truthy for. The `callback` is bound to `thisArg` and
    * invoked with 3 arguments; (value, index|key, collection).
    *
    * @static
@@ -807,7 +2028,7 @@
    * @param {Array|Object|String} collection The collection to iterate over.
    * @param {Function} [callback=identity] The function called per iteration.
    * @param {Mixed} [thisArg] The `this` binding for the callback.
-   * @returns {Array} Returns a new array of values that passed callback check.
+   * @returns {Array} Returns a new array of elements that passed callback check.
    * @example
    *
    * var evens = _.filter([1, 2, 3, 4, 5, 6], function(num) { return num % 2 == 0; });
@@ -816,9 +2037,9 @@
   var filter = createIterator(baseIteratorOptions, filterIteratorOptions);
 
   /**
-   * Examines each value in a `collection`, returning the first one the `callback`
+   * Examines each element in a `collection`, returning the first one the `callback`
    * returns truthy for. The function returns as soon as it finds an acceptable
-   * value, and does not iterate over the entire `collection`. The `callback` is
+   * element, and does not iterate over the entire `collection`. The `callback` is
    * bound to `thisArg` and invoked with 3 arguments; (value, index|key, collection).
    *
    * @static
@@ -828,7 +2049,7 @@
    * @param {Array|Object|String} collection The collection to iterate over.
    * @param {Function} callback The function called per iteration.
    * @param {Mixed} [thisArg] The `this` binding for the callback.
-   * @returns {Mixed} Returns the value that passed the callback check, else `undefined`.
+   * @returns {Mixed} Returns the element that passed the callback check, else `undefined`.
    * @example
    *
    * var even = _.find([1, 2, 3, 4, 5, 6], function(num) { return num % 2 == 0; });
@@ -836,13 +2057,14 @@
    */
   var find = createIterator(baseIteratorOptions, forEachIteratorOptions, {
     'init': '',
-    'inLoop': 'if (callback(iteratee[index], index, collection)) return iteratee[index]'
+    'inLoop': 'if (callback(value, index, collection)) return value'
   });
 
   /**
-   * Iterates over a `collection`, executing the `callback` for each value in the
-   * `collection`. The `callback` is bound to `thisArg` and invoked with 3
-   * arguments; (value, index|key, collection).
+   * Iterates over a `collection`, executing the `callback` for each element in
+   * the `collection`. The `callback` is bound to `thisArg` and invoked with 3
+   * arguments; (value, index|key, collection). Callbacks may exit iteration
+   * early by explicitly returning `false`.
    *
    * @static
    * @memberOf _
@@ -851,7 +2073,7 @@
    * @param {Array|Object|String} collection The collection to iterate over.
    * @param {Function} callback The function called per iteration.
    * @param {Mixed} [thisArg] The `this` binding for the callback.
-   * @returns {Array|Object} Returns the `collection`.
+   * @returns {Array|Object} Returns `collection`.
    * @example
    *
    * _([1, 2, 3]).forEach(alert).join(',');
@@ -863,40 +2085,35 @@
   var forEach = createIterator(baseIteratorOptions, forEachIteratorOptions);
 
   /**
-   * Splits `collection` into sets, grouped by the result of running each value
-   * through `callback`. The `callback` is bound to `thisArg` and invoked with
-   * 3 arguments; (value, index|key, collection). The `callback` argument may
-   * also be the name of a property to group by.
+   * Creates an object composed of keys returned from running each element of
+   * `collection` through a `callback`. The corresponding value of each key is an
+   * array of elements passed to `callback` that returned the key. The `callback`
+   * is bound to `thisArg` and invoked with 3 arguments; (value, index|key, collection).
+   * The `callback` argument may also be the name of a property to count by (e.g. 'length').
    *
    * @static
    * @memberOf _
    * @category Collections
    * @param {Array|Object|String} collection The collection to iterate over.
-   * @param {Function|String} callback The function called per iteration or
-   *  property name to group by.
+   * @param {Function|String} callback|property The function called per iteration
+   *  or property name to group by.
    * @param {Mixed} [thisArg] The `this` binding for the callback.
-   * @returns {Object} Returns an object of grouped values.
+   * @returns {Object} Returns the composed aggregate object.
    * @example
    *
-   * _.groupBy([1.3, 2.1, 2.4], function(num) { return Math.floor(num); });
-   * // => { '1': [1.3], '2': [2.1, 2.4] }
+   * _.groupBy([4.2, 6.1, 6.4], function(num) { return Math.floor(num); });
+   * // => { '4': [4.2], '6': [6.1, 6.4] }
    *
-   * _.groupBy([1.3, 2.1, 2.4], function(num) { return this.floor(num); }, Math);
-   * // => { '1': [1.3], '2': [2.1, 2.4] }
+   * _.groupBy([4.2, 6.1, 6.4], function(num) { return this.floor(num); }, Math);
+   * // => { '4': [4.2], '6': [6.1, 6.4] }
    *
    * _.groupBy(['one', 'two', 'three'], 'length');
    * // => { '3': ['one', 'two'], '5': ['three'] }
    */
-  var groupBy = createIterator(baseIteratorOptions, {
-    'init': '{}',
-    'top':
-      'var prop, isFunc = typeof callback == \'function\';\n' +
-      'if (isFunc && thisArg) callback = iteratorBind(callback, thisArg)',
+  var groupBy = createIterator(baseIteratorOptions, countByIteratorOptions, {
     'inLoop':
-      'prop = isFunc\n' +
-      '  ? callback(iteratee[index], index, collection)\n' +
-      '  : iteratee[index][callback];\n' +
-      '(hasOwnProperty.call(result, prop) ? result[prop] : result[prop] = []).push(iteratee[index])'
+      'prop = callback(value, index, collection);\n' +
+      '(hasOwnProperty.call(result, prop) ? result[prop] : result[prop] = []).push(value)'
   });
 
   /**
@@ -928,18 +2145,17 @@
       '    isFunc = typeof methodName == \'function\'',
     'inLoop': {
       'array':
-        'result[index] = (isFunc ? methodName : iteratee[index][methodName])' +
-        '.apply(iteratee[index], args)',
+        'result[index] = (isFunc ? methodName : value[methodName]).apply(value, args)',
       'object':
-        'result' + (isKeysFast ? '[propIndex] = ' : '.push') +
-        '((isFunc ? methodName : iteratee[index][methodName]).apply(iteratee[index], args))'
+        'result' + (isKeysFast ? '[ownIndex] = ' : '.push') +
+        '((isFunc ? methodName : value[methodName]).apply(value, args))'
     }
   });
 
   /**
-   * Produces a new array of values by mapping each element in the `collection`
-   * through a transformation `callback`. The `callback` is bound to `thisArg`
-   * and invoked with 3 arguments; (value, index|key, collection).
+   * Creates a new array of values by running each element in the `collection`
+   * through a `callback`. The `callback` is bound to `thisArg` and invoked with
+   * 3 arguments; (value, index|key, collection).
    *
    * @static
    * @memberOf _
@@ -948,7 +2164,7 @@
    * @param {Array|Object|String} collection The collection to iterate over.
    * @param {Function} [callback=identity] The function called per iteration.
    * @param {Mixed} [thisArg] The `this` binding for the callback.
-   * @returns {Array} Returns a new array of values returned by the callback.
+   * @returns {Array} Returns a new array of elements returned by the callback.
    * @example
    *
    * _.map([1, 2, 3], function(num) { return num * 3; });
@@ -983,8 +2199,8 @@
   var pluck = createIterator(mapIteratorOptions, {
     'args': 'collection, property',
     'inLoop': {
-      'array':  'result[index] = iteratee[index][property]',
-      'object': 'result' + (isKeysFast ? '[propIndex] = ' : '.push') + '(iteratee[index][property])'
+      'array':  'result[index] = value[property]',
+      'object': 'result' + (isKeysFast ? '[ownIndex] = ' : '.push') + '(value[property])'
     }
   });
 
@@ -1015,15 +2231,15 @@
       'var noaccum = arguments.length < 3;\n' +
       'if (thisArg) callback = iteratorBind(callback, thisArg)',
     'beforeLoop': {
-      'array': 'if (noaccum) result = collection[++index]'
+      'array': 'if (noaccum) result = iteratee[++index]'
     },
     'inLoop': {
       'array':
-        'result = callback(result, iteratee[index], index, collection)',
+        'result = callback(result, value, index, collection)',
       'object':
         'result = noaccum\n' +
-        '  ? (noaccum = false, iteratee[index])\n' +
-        '  : callback(result, iteratee[index], index, collection)'
+        '  ? (noaccum = false, value)\n' +
+        '  : callback(result, value, index, collection)'
     }
   });
 
@@ -1056,7 +2272,8 @@
     if(thisArg) {
       callback = iteratorBind(callback, thisArg);
     }
-    if (length === length >>> 0) {
+    // Opera 10.53-10.60 JITted `length >>> 0` returns the wrong value for negative numbers
+    if (length > -1 && length === length >>> 0) {
       var iteratee = noCharByIndex && toString.call(collection) == stringClass
         ? collection.split('')
         : collection;
@@ -1094,7 +2311,7 @@
    * @param {Array|Object|String} collection The collection to iterate over.
    * @param {Function} [callback=identity] The function called per iteration.
    * @param {Mixed} [thisArg] The `this` binding for the callback.
-   * @returns {Array} Returns a new array of values that did **not** pass the callback check.
+   * @returns {Array} Returns a new array of elements that did **not** pass the callback check.
    * @example
    *
    * var odds = _.reject([1, 2, 3, 4, 5, 6], function(num) { return num % 2 == 0; });
@@ -1117,7 +2334,7 @@
    * @param {Array|Object|String} collection The collection to iterate over.
    * @param {Function} [callback=identity] The function called per iteration.
    * @param {Mixed} [thisArg] The `this` binding for the callback.
-   * @returns {Boolean} Returns `true` if any value passes the callback check, else `false`.
+   * @returns {Boolean} Returns `true` if any element passes the callback check, else `false`.
    * @example
    *
    * _.some([null, 0, 'yes', false]);
@@ -1128,22 +2345,20 @@
     'inLoop': everyIteratorOptions.inLoop.replace('!', '')
   });
 
-
   /**
-   * Produces a new sorted array, sorted in ascending order by the results of
-   * running each element of `collection` through a transformation `callback`.
-   * The `callback` is bound to `thisArg` and invoked with 3 arguments;
-   * (value, index|key, collection). The `callback` argument may also be the
-   * name of a property to sort by (e.g. 'length').
+   * Creates a new array, stable sorted in ascending order by the results of
+   * running each element of `collection` through a `callback`. The `callback`
+   * is bound to `thisArg` and invoked with 3 arguments; (value, index|key, collection).
+   * The `callback` argument may also be the name of a property to sort by (e.g. 'length').
    *
    * @static
    * @memberOf _
    * @category Collections
    * @param {Array|Object|String} collection The collection to iterate over.
-   * @param {Function|String} callback The function called per iteration or
-   *  property name to sort by.
+   * @param {Function|String} callback|property The function called per iteration
+   *  or property name to sort by.
    * @param {Mixed} [thisArg] The `this` binding for the callback.
-   * @returns {Array} Returns a new array of sorted values.
+   * @returns {Array} Returns a new array of sorted elements.
    * @example
    *
    * _.sortBy([1, 2, 3], function(num) { return Math.sin(num); });
@@ -1155,25 +2370,19 @@
    * _.sortBy(['larry', 'brendan', 'moe'], 'length');
    * // => ['moe', 'larry', 'brendan']
    */
-  var sortBy = createIterator(baseIteratorOptions, mapIteratorOptions, {
-    'top':
-      'if (typeof callback == \'string\') {\n' +
-      '  var prop = callback;\n' +
-      '  callback = function(collection) { return collection[prop] }\n' +
-      '}\n' +
-      'else if (thisArg) {\n' +
-      '  callback = iteratorBind(callback, thisArg)\n' +
-      '}',
+  var sortBy = createIterator(baseIteratorOptions, countByIteratorOptions, mapIteratorOptions, {
     'inLoop': {
       'array':
         'result[index] = {\n' +
-        '  criteria: callback(iteratee[index], index, collection),\n' +
-        '  value: iteratee[index]\n' +
+        '  criteria: callback(value, index, collection),\n' +
+        '  index: index,\n' +
+        '  value: value\n' +
         '}',
       'object':
-        'result' + (isKeysFast ? '[propIndex] = ' : '.push') + '({\n' +
-        '  criteria: callback(iteratee[index], index, collection),\n' +
-        '  value: iteratee[index]\n' +
+        'result' + (isKeysFast ? '[ownIndex] = ' : '.push') + '({\n' +
+        '  criteria: callback(value, index, collection),\n' +
+        '  index: index,\n' +
+        '  value: value\n' +
         '})'
     },
     'bottom':
@@ -1185,7 +2394,7 @@
   });
 
   /**
-   * Converts the `collection`, into an array. Useful for converting the
+   * Converts the `collection`, to an array. Useful for converting the
    * `arguments` object.
    *
    * @static
@@ -1202,11 +2411,11 @@
     if (!collection) {
       return [];
     }
-    if (collection.toArray && toString.call(collection.toArray) == funcClass) {
+    if (collection.toArray && isFunction(collection.toArray)) {
       return collection.toArray();
     }
     var length = collection.length;
-    if (length === length >>> 0) {
+    if (length > -1 && length === length >>> 0) {
       return (noArraySliceOnStrings ? toString.call(collection) == stringClass : typeof collection == 'string')
         ? collection.split('')
         : slice.call(collection);
@@ -1214,10 +2423,45 @@
     return values(collection);
   }
 
+  /**
+   * Examines each element in a `collection`, returning an array of all elements
+   * that contain the given `properties`.
+   *
+   * @static
+   * @memberOf _
+   * @category Collections
+   * @param {Array|Object|String} collection The collection to iterate over.
+   * @param {Object} properties The object of properties/values to filter by.
+   * @returns {Array} Returns a new array of elements that contain the given `properties`.
+   * @example
+   *
+   * var stooges = [
+   *   { 'name': 'moe', 'age': 40 },
+   *   { 'name': 'larry', 'age': 50 },
+   *   { 'name': 'curly', 'age': 60 }
+   * ];
+   *
+   * _.where(stooges, { 'age': 40 });
+   * // => [{ 'name': 'moe', 'age': 40 }]
+   */
+  var where = createIterator(filterIteratorOptions, {
+    'args': 'collection, properties',
+    'top':
+      'var props = [];\n' +
+      'forIn(properties, function(value, prop) { props.push(prop) });\n' +
+      'var propsLength = props.length',
+    'inLoop':
+      'for (var prop, pass = true, propIndex = 0; propIndex < propsLength; propIndex++) {\n' +
+      '  prop = props[propIndex];\n' +
+      '  if (!(pass = value[prop] === properties[prop])) break\n' +
+      '}\n' +
+      'pass && result.push(value)'
+  });
+
   /*--------------------------------------------------------------------------*/
 
   /**
-   * Produces a new array with all falsey values of `array` removed. The values
+   * Creates a new array with all falsey values of `array` removed. The values
    * `false`, `null`, `0`, `""`, `undefined` and `NaN` are all falsey.
    *
    * @static
@@ -1247,7 +2491,7 @@
   }
 
   /**
-   * Produces a new array of `array` values not present in the other arrays
+   * Creates a new array of `array` elements not present in the other arrays
    * using strict equality for comparisons, i.e. `===`.
    *
    * @static
@@ -1255,7 +2499,7 @@
    * @category Arrays
    * @param {Array} array The array to process.
    * @param {Array} [array1, array2, ...] Arrays to check.
-   * @returns {Array} Returns a new array of `array` values not present in the
+   * @returns {Array} Returns a new array of `array` elements not present in the
    *  other arrays.
    * @example
    *
@@ -1281,8 +2525,8 @@
   }
 
   /**
-   * Gets the first value of the `array`. Pass `n` to return the first `n` values
-   * of the `array`.
+   * Gets the first element of the `array`. Pass `n` to return the first `n`
+   * elements of the `array`.
    *
    * @static
    * @memberOf _
@@ -1292,8 +2536,8 @@
    * @param {Number} [n] The number of elements to return.
    * @param {Object} [guard] Internally used to allow this method to work with
    *  others like `_.map` without using their callback `index` argument for `n`.
-   * @returns {Mixed} Returns the first value or an array of the first `n` values
-   *  of `array`.
+   * @returns {Mixed} Returns the first element or an array of the first `n`
+   *  elements of `array`.
    * @example
    *
    * _.first([5, 4, 3, 2, 1]);
@@ -1391,8 +2635,8 @@
   }
 
   /**
-   * Gets all but the last value of `array`. Pass `n` to exclude the last `n`
-   * values from the result.
+   * Gets all but the last element of `array`. Pass `n` to exclude the last `n`
+   * elements from the result.
    *
    * @static
    * @memberOf _
@@ -1401,7 +2645,7 @@
    * @param {Number} [n] The number of elements to return.
    * @param {Object} [guard] Internally used to allow this method to work with
    *  others like `_.map` without using their callback `index` argument for `n`.
-   * @returns {Array} Returns all but the last value or `n` values of `array`.
+   * @returns {Array} Returns all but the last element or `n` elements of `array`.
    * @example
    *
    * _.initial([3, 2, 1]);
@@ -1415,13 +2659,14 @@
   }
 
   /**
-   * Computes the intersection of all the passed-in arrays.
+   * Computes the intersection of all the passed-in arrays using strict equality
+   * for comparisons, i.e. `===`.
    *
    * @static
    * @memberOf _
    * @category Arrays
    * @param {Array} [array1, array2, ...] Arrays to process.
-   * @returns {Array} Returns a new array of unique values, in order, that are
+   * @returns {Array} Returns a new array of unique elements, in order, that are
    *  present in **all** of the arrays.
    * @example
    *
@@ -1434,17 +2679,19 @@
       return result;
     }
     var value,
+        argsLength = arguments.length,
+        cache = [],
         index = -1,
-        length = array.length,
-        others = slice.call(arguments, 1),
-        cache = [];
+        length = array.length;
 
-    while (++index < length) {
+    array: while (++index < length) {
       value = array[index];
-      if (indexOf(result, value) < 0 &&
-          every(others, function(other, index) {
-            return (cache[index] || (cache[index] = cachedContains(other)))(value);
-          })) {
+      if (indexOf(result, value) < 0) {
+        for (var argsIndex = 1; argsIndex < argsLength; argsIndex++) {
+          if (!(cache[argsIndex] || (cache[argsIndex] = cachedContains(arguments[argsIndex])))(value)) {
+            continue array;
+          }
+        }
         result.push(value);
       }
     }
@@ -1452,8 +2699,8 @@
   }
 
   /**
-   * Gets the last value of the `array`. Pass `n` to return the lasy `n` values
-   * of the `array`.
+   * Gets the last element of the `array`. Pass `n` to return the lasy `n`
+   * elementsvof the `array`.
    *
    * @static
    * @memberOf _
@@ -1462,8 +2709,8 @@
    * @param {Number} [n] The number of elements to return.
    * @param {Object} [guard] Internally used to allow this method to work with
    *  others like `_.map` without using their callback `index` argument for `n`.
-   * @returns {Mixed} Returns the last value or an array of the last `n` values
-   *  of `array`.
+   * @returns {Mixed} Returns the last element or an array of the last `n`
+   *  elements of `array`.
    * @example
    *
    * _.last([3, 2, 1]);
@@ -1647,9 +2894,11 @@
    * // => []
    */
   function range(start, end, step) {
-    step || (step = 1);
+    start = +start || 0;
+    step = +step || 1;
+
     if (end == null) {
-      end = start || 0;
+      end = start;
       start = 0;
     }
     // use `Array(length)` so V8 will avoid the slower "dictionary" mode
@@ -1691,7 +2940,7 @@
   }
 
   /**
-   * Produces a new array of shuffled `array` values, using a version of the
+   * Creates a new array of shuffled `array` values, using a version of the
    * Fisher-Yates shuffle. See http://en.wikipedia.org/wiki/Fisher-Yates_shuffle.
    *
    * @static
@@ -1783,7 +3032,8 @@
   }
 
   /**
-   * Computes the union of the passed-in arrays.
+   * Computes the union of the passed-in arrays using strict equality for
+   * comparisons, i.e. `===`.
    *
    * @static
    * @memberOf _
@@ -1811,12 +3061,11 @@
   }
 
   /**
-   * Produces a duplicate-value-free version of the `array` using strict equality
+   * Creates a duplicate-value-free version of the `array` using strict equality
    * for comparisons, i.e. `===`. If the `array` is already sorted, passing `true`
-   * for `isSorted` will run a faster algorithm. If `callback` is passed,
-   * each value of `array` is passed through a transformation `callback` before
-   * uniqueness is computed. The `callback` is bound to `thisArg` and invoked
-   * with 3 arguments; (value, index, array).
+   * for `isSorted` will run a faster algorithm. If `callback` is passed, each
+   * element of `array` is passed through a callback` before uniqueness is computed.
+   * The `callback` is bound to `thisArg` and invoked with 3 arguments; (value, index, array).
    *
    * @static
    * @memberOf _
@@ -1876,7 +3125,7 @@
   }
 
   /**
-   * Produces a new array with all occurrences of the passed values removed using
+   * Creates a new array with all occurrences of the passed values removed using
    * strict equality for comparisons, i.e. `===`.
    *
    * @static
@@ -1908,7 +3157,7 @@
   }
 
   /**
-   * Merges the elements of each array at their corresponding indexes. Useful for
+   * Groups the elements of each array at their corresponding indexes. Useful for
    * separate data sources that are coordinated through matching array indexes.
    * For a matrix of nested arrays, `_.zip.apply(...)` can transpose the matrix
    * in a similar fashion.
@@ -1917,7 +3166,7 @@
    * @memberOf _
    * @category Arrays
    * @param {Array} [array1, array2, ...] Arrays to process.
-   * @returns {Array} Returns a new array of merged arrays.
+   * @returns {Array} Returns a new array of grouped elements.
    * @example
    *
    * _.zip(['moe', 'larry', 'curly'], [30, 40, 50], [true, false, false]);
@@ -1938,7 +3187,7 @@
   }
 
   /**
-   * Merges an array of `keys` and an array of `values` into a single object.
+   * Creates an object composed from an array of `keys` and an array of `values`.
    *
    * @static
    * @memberOf _
@@ -2044,7 +3293,7 @@
    */
   function bind(func, thisArg) {
     var methodName,
-        isFunc = toString.call(func) == funcClass;
+        isFunc = isFunction(func);
 
     // juggle arguments
     if (!isFunc) {
@@ -2070,7 +3319,7 @@
       }
       if (partialArgs.length) {
         args = args.length
-          ? concat.apply(partialArgs, args)
+          ? partialArgs.concat(slice.call(args))
           : partialArgs;
       }
       if (this instanceof bound) {
@@ -2100,7 +3349,7 @@
    * @category Functions
    * @param {Object} object The object to bind and assign the bound methods to.
    * @param {String} [methodName1, methodName2, ...] Method names on the object to bind.
-   * @returns {Object} Returns the `object`.
+   * @returns {Object} Returns `object`.
    * @example
    *
    * var buttonView = {
@@ -2121,13 +3370,15 @@
       'var funcs = arguments,\n' +
       '    length = funcs.length;\n' +
       'if (length > 1) {\n' +
-      '  for (var index = 1; index < length; index++)\n' +
-      '    result[funcs[index]] = bind(result[funcs[index]], result);\n' +
+      '  for (var index = 1; index < length; index++) {\n' +
+      '    result[funcs[index]] = bind(result[funcs[index]], result)\n' +
+      '  }\n' +
       '  return result\n' +
       '}',
     'inLoop':
-      'if (toString.call(result[index]) == funcClass)' +
-      ' result[index] = bind(result[index], result)'
+      'if (isFunction(result[index])) {\n' +
+      '  result[index] = bind(result[index], result)\n' +
+      '}'
   });
 
   /**
@@ -2211,7 +3462,7 @@
 
   /**
    * Executes the `func` function after `wait` milliseconds. Additional arguments
-   * are passed to `func` when it is invoked.
+   * will be passed to `func` when it is invoked.
    *
    * @static
    * @memberOf _
@@ -2233,7 +3484,7 @@
 
   /**
    * Defers executing the `func` function until the current call stack has cleared.
-   * Additional arguments are passed to `func` when it is invoked.
+   * Additional arguments will be passed to `func` when it is invoked.
    *
    * @static
    * @memberOf _
@@ -2305,15 +3556,17 @@
       }
       ran = true;
       result = func.apply(this, arguments);
+
+      // clear the `func` variable so the function may be garbage collected
+      func = null;
       return result;
     };
   }
 
   /**
    * Creates a new function that, when called, invokes `func` with any additional
-   * `partial` arguments prepended to those passed to the partially applied
-   * function. This method is similar `bind`, except it does **not** alter the
-   * `this` binding.
+   * `partial` arguments prepended to those passed to the new function. This method
+   * is similar `bind`, except it does **not** alter the `this` binding.
    *
    * @static
    * @memberOf _
@@ -2396,16 +3649,15 @@
   }
 
   /**
-   * Create a new function that passes the `func` function to the `wrapper`
-   * function as its first argument. Additional arguments are appended to those
-   * passed to the `wrapper` function.
+   * Creates a new function that passes `value` to the `wrapper` function as its
+   * first argument. Additional arguments passed to the new function are appended
+   * to those passed to the `wrapper` function.
    *
    * @static
    * @memberOf _
    * @category Functions
-   * @param {Function} func The function to wrap.
+   * @param {Mixed} value The value to wrap.
    * @param {Function} wrapper The wrapper function.
-   * @param {Mixed} [arg1, arg2, ...] Arguments to append to those passed to the wrapper.
    * @returns {Function} Returns the new function.
    * @example
    *
@@ -2416,9 +3668,9 @@
    * hello();
    * // => 'before, hello: moe, after'
    */
-  function wrap(func, wrapper) {
+  function wrap(value, wrapper) {
     return function() {
-      var args = [func];
+      var args = [value];
       if (arguments.length) {
         push.apply(args, arguments);
       }
@@ -2429,742 +3681,8 @@
   /*--------------------------------------------------------------------------*/
 
   /**
-   * Create a shallow clone of the `value`. Any nested objects or arrays will be
-   * assigned by reference and not cloned.
-   *
-   * @static
-   * @memberOf _
-   * @category Objects
-   * @param {Mixed} value The value to clone.
-   * @returns {Mixed} Returns the cloned `value`.
-   * @example
-   *
-   * _.clone({ 'name': 'moe' });
-   * // => { 'name': 'moe' };
-   */
-  function clone(value) {
-    return value && objectTypes[typeof value]
-      ? (isArray(value) ? value.slice() : extend({}, value))
-      : value;
-  }
-
-  /**
-   * Assigns missing properties on `object` with default values from the defaults
-   * objects. Once a property is set, additional defaults of the same property
-   * will be ignored.
-   *
-   * @static
-   * @memberOf _
-   * @category Objects
-   * @param {Object} object The object to populate.
-   * @param {Object} [defaults1, defaults2, ...] The defaults objects to apply to `object`.
-   * @returns {Object} Returns `object`.
-   * @example
-   *
-   * var iceCream = { 'flavor': 'chocolate' };
-   * _.defaults(iceCream, { 'flavor': 'vanilla', 'sprinkles': 'rainbow' });
-   * // => { 'flavor': 'chocolate', 'sprinkles': 'rainbow' }
-   */
-  var defaults = createIterator(extendIteratorOptions, {
-    'inLoop': 'if (result[index] == null) ' + extendIteratorOptions.inLoop
-  });
-
-  /**
-   * Copies enumerable properties from the source objects to the `destination` object.
-   * Subsequent sources will overwrite propery assignments of previous sources.
-   *
-   * @static
-   * @memberOf _
-   * @category Objects
-   * @param {Object} object The destination object.
-   * @param {Object} [source1, source2, ...] The source objects.
-   * @returns {Object} Returns the destination object.
-   * @example
-   *
-   * _.extend({ 'name': 'moe' }, { 'age': 40 });
-   * // => { 'name': 'moe', 'age': 40 }
-   */
-  var extend = createIterator(extendIteratorOptions);
-
-  /**
-   * Iterates over `object`'s own and inherited enumerable properties, executing
-   * the `callback` for each property. The `callback` is bound to `thisArg` and
-   * invoked with 3 arguments; (value, key, object).
-   *
-   * @static
-   * @memberOf _
-   * @category Objects
-   * @param {Object} object The object to iterate over.
-   * @param {Function} callback The function called per iteration.
-   * @param {Mixed} [thisArg] The `this` binding for the callback.
-   * @returns {Object} Returns the `object`.
-   * @example
-   *
-   * function Dog(name) {
-   *   this.name = name;
-   * }
-   *
-   * Dog.prototype.bark = function() {
-   *   alert('Woof, woof!');
-   * };
-   *
-   * _.forIn(new Dog('Dagny'), function(value, key) {
-   *   alert(key);
-   * });
-   * // => alerts 'name' and 'bark' (order is not guaranteed)
-   */
-  var forIn = createIterator(baseIteratorOptions, forEachIteratorOptions, forOwnIteratorOptions, {
-    'useHas': false
-  });
-
-  /**
-   * Iterates over `object`'s own enumerable properties, executing the `callback`
-   * for each property. The `callback` is bound to `thisArg` and invoked with 3
-   * arguments; (value, key, object).
-   *
-   * @static
-   * @memberOf _
-   * @category Objects
-   * @param {Object} object The object to iterate over.
-   * @param {Function} callback The function called per iteration.
-   * @param {Mixed} [thisArg] The `this` binding for the callback.
-   * @returns {Object} Returns the `object`.
-   * @example
-   *
-   * _.forOwn({ '0': 'zero', '1': 'one', 'length': 2 }, function(num, key) {
-   *   alert(key);
-   * });
-   * // => alerts '0', '1', and 'length' (order is not guaranteed)
-   */
-  var forOwn = createIterator(baseIteratorOptions, forEachIteratorOptions, forOwnIteratorOptions);
-
-  /**
-   * Produces a sorted array of the enumerable properties, own and inherited,
-   * of `object` that have function values.
-   *
-   * @static
-   * @memberOf _
-   * @alias methods
-   * @category Objects
-   * @param {Object} object The object to inspect.
-   * @returns {Array} Returns a new array of property names that have function values.
-   * @example
-   *
-   * _.functions(_);
-   * // => ['all', 'any', 'bind', 'bindAll', 'clone', 'compact', 'compose', ...]
-   */
-  var functions = createIterator({
-    'useHas': false,
-    'args': 'object',
-    'init': '[]',
-    'inLoop': 'if (toString.call(iteratee[index]) == funcClass) result.push(index)',
-    'bottom': 'result.sort()'
-  });
-
-  /**
-   * Checks if the specified object `property` exists and is a direct property,
-   * instead of an inherited property.
-   *
-   * @static
-   * @memberOf _
-   * @category Objects
-   * @param {Object} object The object to check.
-   * @param {String} property The property to check for.
-   * @returns {Boolean} Returns `true` if key is a direct property, else `false`.
-   * @example
-   *
-   * _.has({ 'a': 1, 'b': 2, 'c': 3 }, 'b');
-   * // => true
-   */
-  function has(object, property) {
-    return hasOwnProperty.call(object, property);
-  }
-
-  /**
-   * Checks if `value` is an `arguments` object.
-   *
-   * @static
-   * @memberOf _
-   * @category Objects
-   * @param {Mixed} value The value to check.
-   * @returns {Boolean} Returns `true` if the `value` is an `arguments` object, else `false`.
-   * @example
-   *
-   * (function() { return _.isArguments(arguments); })(1, 2, 3);
-   * // => true
-   *
-   * _.isArguments([1, 2, 3]);
-   * // => false
-   */
-  var isArguments = function(value) {
-    return toString.call(value) == '[object Arguments]';
-  };
-  // fallback for browser like Firefox < 4 and IE < 9 which detect
-  // `arguments` as `[object Object]`
-  if (!isArguments(arguments)) {
-    isArguments = function(value) {
-      return !!(value && hasOwnProperty.call(value, 'callee'));
-    };
-  }
-
-  /**
-   * Checks if `value` is an array.
-   *
-   * @static
-   * @memberOf _
-   * @category Objects
-   * @param {Mixed} value The value to check.
-   * @returns {Boolean} Returns `true` if the `value` is an array, else `false`.
-   * @example
-   *
-   * (function() { return _.isArray(arguments); })();
-   * // => false
-   *
-   * _.isArray([1, 2, 3]);
-   * // => true
-   */
-  var isArray = nativeIsArray || function(value) {
-    return toString.call(value) == arrayClass;
-  };
-
-  /**
-   * Checks if `value` is a boolean (`true` or `false`) value.
-   *
-   * @static
-   * @memberOf _
-   * @category Objects
-   * @param {Mixed} value The value to check.
-   * @returns {Boolean} Returns `true` if the `value` is a boolean value, else `false`.
-   * @example
-   *
-   * _.isBoolean(null);
-   * // => false
-   */
-  function isBoolean(value) {
-    return value === true || value === false || toString.call(value) == boolClass;
-  }
-
-  /**
-   * Checks if `value` is a date.
-   *
-   * @static
-   * @memberOf _
-   * @category Objects
-   * @param {Mixed} value The value to check.
-   * @returns {Boolean} Returns `true` if the `value` is a date, else `false`.
-   * @example
-   *
-   * _.isDate(new Date);
-   * // => true
-   */
-  function isDate(value) {
-    return toString.call(value) == dateClass;
-  }
-
-  /**
-   * Checks if `value` is a DOM element.
-   *
-   * @static
-   * @memberOf _
-   * @category Objects
-   * @param {Mixed} value The value to check.
-   * @returns {Boolean} Returns `true` if the `value` is a DOM element, else `false`.
-   * @example
-   *
-   * _.isElement(document.body);
-   * // => true
-   */
-  function isElement(value) {
-    return !!(value && value.nodeType == 1);
-  }
-
-  /**
-   * Checks if `value` is empty. Arrays or strings with a length of `0` and
-   * objects with no own enumerable properties are considered "empty".
-   *
-   * @static
-   * @memberOf _
-   * @category Objects
-   * @param {Array|Object|String} value The value to inspect.
-   * @returns {Boolean} Returns `true` if the `value` is empty, else `false`.
-   * @example
-   *
-   * _.isEmpty([1, 2, 3]);
-   * // => false
-   *
-   * _.isEmpty({});
-   * // => true
-   *
-   * _.isEmpty('');
-   * // => true
-   */
-  var isEmpty = createIterator({
-    'args': 'value',
-    'init': 'true',
-    'top':
-      'var className = toString.call(value);\n' +
-      'if (className == arrayClass || className == stringClass) return !value.length',
-    'inLoop': {
-      'object': 'return false'
-    }
-  });
-
-  /**
-   * Performs a deep comparison between two values to determine if they are
-   * equivalent to each other.
-   *
-   * @static
-   * @memberOf _
-   * @category Objects
-   * @param {Mixed} a The value to compare.
-   * @param {Mixed} b The other value to compare.
-   * @param {Array} [stack] Internally used to keep track of "seen" objects to
-   *  avoid circular references.
-   * @returns {Boolean} Returns `true` if the values are equvalent, else `false`.
-   * @example
-   *
-   * var moe = { 'name': 'moe', 'luckyNumbers': [13, 27, 34] };
-   * var clone = { 'name': 'moe', 'luckyNumbers': [13, 27, 34] };
-   *
-   * moe == clone;
-   * // => false
-   *
-   * _.isEqual(moe, clone);
-   * // => true
-   */
-  function isEqual(a, b, stack) {
-    stack || (stack = []);
-
-    // exit early for identical values
-    if (a === b) {
-      // treat `+0` vs. `-0` as not equal
-      return a !== 0 || (1 / a == 1 / b);
-    }
-    // a strict comparison is necessary because `undefined == null`
-    if (a == null || b == null) {
-      return a === b;
-    }
-    // unwrap any wrapped objects
-    if (a._chain) {
-      a = a._wrapped;
-    }
-    if (b._chain) {
-      b = b._wrapped;
-    }
-    // invoke a custom `isEqual` method if one is provided
-    if (a.isEqual && toString.call(a.isEqual) == funcClass) {
-      return a.isEqual(b);
-    }
-    if (b.isEqual && toString.call(b.isEqual) == funcClass) {
-      return b.isEqual(a);
-    }
-    // compare [[Class]] names
-    var className = toString.call(a);
-    if (className != toString.call(b)) {
-      return false;
-    }
-    switch (className) {
-      // strings, numbers, dates, and booleans are compared by value
-      case stringClass:
-        // primitives and their corresponding object instances are equivalent;
-        // thus, `'5'` is quivalent to `new String('5')`
-        return a == String(b);
-
-      case numberClass:
-        // treat `NaN` vs. `NaN` as equal
-        return a != +a
-          ? b != +b
-          // but treat `+0` vs. `-0` as not equal
-          : (a == 0 ? (1 / a == 1 / b) : a == +b);
-
-      case boolClass:
-      case dateClass:
-        // coerce dates and booleans to numeric values, dates to milliseconds and
-        // booleans to 1 or 0; treat invalid dates coerced to `NaN` as not equal
-        return +a == +b;
-
-      // regexps are compared by their source and flags
-      case regexpClass:
-        return a.source == b.source &&
-               a.global == b.global &&
-               a.multiline == b.multiline &&
-               a.ignoreCase == b.ignoreCase;
-    }
-    if (typeof a != 'object' || typeof b != 'object') {
-      return false;
-    }
-    // Assume equality for cyclic structures. The algorithm for detecting cyclic
-    // structures is adapted from ES 5.1 section 15.12.3, abstract operation `JO`.
-    var length = stack.length;
-    while (length--) {
-      // Linear search. Performance is inversely proportional to the number of
-      // unique nested structures.
-      if (stack[length] == a) {
-        return true;
-      }
-    }
-
-    var index = -1,
-        result = true,
-        size = 0;
-
-    // add the first collection to the stack of traversed objects
-    stack.push(a);
-
-    // recursively compare objects and arrays
-    if (className == arrayClass) {
-      // compare array lengths to determine if a deep comparison is necessary
-      size = a.length;
-      result = size == b.length;
-
-      if (result) {
-        // deep compare the contents, ignoring non-numeric properties
-        while (size--) {
-          if (!(result = isEqual(a[size], b[size], stack))) {
-            break;
-          }
-        }
-      }
-    }
-    else {
-      // objects with different constructors are not equivalent
-      if ('constructor' in a != 'constructor' in b || a.constructor != b.constructor) {
-        return false;
-      }
-      // deep compare objects.
-      for (var prop in a) {
-        if (hasOwnProperty.call(a, prop)) {
-          // count the number of properties.
-          size++;
-          // deep compare each property value.
-          if (!(result = hasOwnProperty.call(b, prop) && isEqual(a[prop], b[prop], stack))) {
-            break;
-          }
-        }
-      }
-      // ensure both objects have the same number of properties
-      if (result) {
-        for (prop in b) {
-          // Adobe's JS engine, embedded in applications like InDesign, has a
-          // bug that causes `!size--` to throw an error so it must be wrapped
-          // in parentheses.
-          // https://github.com/documentcloud/underscore/issues/355
-          if (hasOwnProperty.call(b, prop) && !(size--)) {
-            break;
-          }
-        }
-        result = !size;
-      }
-      // handle JScript [[DontEnum]] bug
-      if (result && hasDontEnumBug) {
-        while (++index < 7) {
-          prop = shadowed[index];
-          if (hasOwnProperty.call(a, prop)) {
-            if (!(result = hasOwnProperty.call(b, prop) && isEqual(a[prop], b[prop], stack))) {
-              break;
-            }
-          }
-        }
-      }
-    }
-    // remove the first collection from the stack of traversed objects
-    stack.pop();
-    return result;
-  }
-
-  /**
-   * Checks if `value` is a finite number.
-   * Note: This is not the same as native `isFinite`, which will return true for
-   * booleans and other values. See http://es5.github.com/#x15.1.2.5.
-   *
-   * @deprecated
-   * @static
-   * @memberOf _
-   * @category Objects
-   * @param {Mixed} value The value to check.
-   * @returns {Boolean} Returns `true` if the `value` is a finite number, else `false`.
-   * @example
-   *
-   * _.isFinite(-101);
-   * // => true
-   *
-   * _.isFinite('10');
-   * // => false
-   *
-   * _.isFinite(Infinity);
-   * // => false
-   */
-  function isFinite(value) {
-    return nativeIsFinite(value) && toString.call(value) == numberClass;
-  }
-
-  /**
-   * Checks if `value` is a function.
-   *
-   * @static
-   * @memberOf _
-   * @category Objects
-   * @param {Mixed} value The value to check.
-   * @returns {Boolean} Returns `true` if the `value` is a function, else `false`.
-   * @example
-   *
-   * _.isFunction(''.concat);
-   * // => true
-   */
-  function isFunction(value) {
-    return toString.call(value) == funcClass;
-  }
-
-  /**
-   * Checks if `value` is the language type of Object.
-   * (e.g. arrays, functions, objects, regexps, `new Number(0)`, and `new String('')`)
-   *
-   * @static
-   * @memberOf _
-   * @category Objects
-   * @param {Mixed} value The value to check.
-   * @returns {Boolean} Returns `true` if the `value` is an object, else `false`.
-   * @example
-   *
-   * _.isObject({});
-   * // => true
-   *
-   * _.isObject(1);
-   * // => false
-   */
-  function isObject(value) {
-    // check if the value is the ECMAScript language type of Object
-    // http://es5.github.com/#x8
-    return value && objectTypes[typeof value];
-  }
-
-  /**
-   * Checks if `value` is `NaN`.
-   * Note: This is not the same as native `isNaN`, which will return true for
-   * `undefined` and other values. See http://es5.github.com/#x15.1.2.4.
-   *
-   * @deprecated
-   * @static
-   * @memberOf _
-   * @category Objects
-   * @param {Mixed} value The value to check.
-   * @returns {Boolean} Returns `true` if the `value` is `NaN`, else `false`.
-   * @example
-   *
-   * _.isNaN(NaN);
-   * // => true
-   *
-   * _.isNaN(new Number(NaN));
-   * // => true
-   *
-   * isNaN(undefined);
-   * // => true
-   *
-   * _.isNaN(undefined);
-   * // => false
-   */
-  function isNaN(value) {
-    // `NaN` as a primitive is the only value that is not equal to itself
-    // (perform the [[Class]] check first to avoid errors with some host objects in IE)
-    return toString.call(value) == numberClass && value != +value
-  }
-
-  /**
-   * Checks if `value` is `null`.
-   *
-   * @deprecated
-   * @static
-   * @memberOf _
-   * @category Objects
-   * @param {Mixed} value The value to check.
-   * @returns {Boolean} Returns `true` if the `value` is `null`, else `false`.
-   * @example
-   *
-   * _.isNull(null);
-   * // => true
-   *
-   * _.isNull(undefined);
-   * // => false
-   */
-  function isNull(value) {
-    return value === null;
-  }
-
-  /**
-   * Checks if `value` is a number.
-   *
-   * @static
-   * @memberOf _
-   * @category Objects
-   * @param {Mixed} value The value to check.
-   * @returns {Boolean} Returns `true` if the `value` is a number, else `false`.
-   * @example
-   *
-   * _.isNumber(8.4 * 5;
-   * // => true
-   */
-  function isNumber(value) {
-    return toString.call(value) == numberClass;
-  }
-
-  /**
-   * Checks if `value` is a regular expression.
-   *
-   * @static
-   * @memberOf _
-   * @category Objects
-   * @param {Mixed} value The value to check.
-   * @returns {Boolean} Returns `true` if the `value` is a regular expression, else `false`.
-   * @example
-   *
-   * _.isRegExp(/moe/);
-   * // => true
-   */
-  function isRegExp(value) {
-    return toString.call(value) == regexpClass;
-  }
-
-  /**
-   * Checks if `value` is a string.
-   *
-   * @static
-   * @memberOf _
-   * @category Objects
-   * @param {Mixed} value The value to check.
-   * @returns {Boolean} Returns `true` if the `value` is a string, else `false`.
-   * @example
-   *
-   * _.isString('moe');
-   * // => true
-   */
-  function isString(value) {
-    return toString.call(value) == stringClass;
-  }
-
-  /**
-   * Checks if `value` is `undefined`.
-   *
-   * @deprecated
-   * @static
-   * @memberOf _
-   * @category Objects
-   * @param {Mixed} value The value to check.
-   * @returns {Boolean} Returns `true` if the `value` is `undefined`, else `false`.
-   * @example
-   *
-   * _.isUndefined(void 0);
-   * // => true
-   */
-  function isUndefined(value) {
-    return value === undefined;
-  }
-
-  /**
-   * Produces an array of object`'s own enumerable property names.
-   *
-   * @static
-   * @memberOf _
-   * @category Objects
-   * @param {Object} object The object to inspect.
-   * @returns {Array} Returns a new array of property names.
-   * @example
-   *
-   * _.keys({ 'one': 1, 'two': 2, 'three': 3 });
-   * // => ['one', 'two', 'three'] (order is not guaranteed)
-   */
-  var keys = !nativeKeys ? shimKeys : function(object) {
-    // avoid iterating over the `prototype` property
-    return typeof object == 'function' && propertyIsEnumerable.call(object, 'prototype')
-      ? shimKeys(object)
-      : nativeKeys(object);
-  };
-
-  /**
-   * Creates an object composed of the specified properties. Property names may
-   * be specified as individual arguments or as arrays of property names.
-   *
-   * @static
-   * @memberOf _
-   * @category Objects
-   * @param {Object} object The object to pluck.
-   * @param {Object} [prop1, prop2, ...] The properties to pick.
-   * @returns {Object} Returns an object composed of the picked properties.
-   * @example
-   *
-   * _.pick({ 'name': 'moe', 'age': 40, 'userid': 'moe1' }, 'name', 'age');
-   * // => { 'name': 'moe', 'age': 40 }
-   */
-  function pick(object) {
-    var prop,
-        index = 0,
-        props = concat.apply(ArrayProto, arguments),
-        length = props.length,
-        result = {};
-
-    // start `index` at `1` to skip `object`
-    while (++index < length) {
-      prop = props[index];
-      if (prop in object) {
-        result[prop] = object[prop];
-      }
-    }
-    return result;
-  }
-
-  /**
-   * Gets the size of `value` by returning `value.length` if `value` is a string
-   * or array, or the number of own enumerable properties if `value` is an object.
-   *
-   * @deprecated
-   * @static
-   * @memberOf _
-   * @category Objects
-   * @param {Array|Object|String} value The value to inspect.
-   * @returns {Number} Returns `value.length` if `value` is a string or array,
-   *  or the number of own enumerable properties if `value` is an object.
-   * @example
-   *
-   * _.size([1, 2]);
-   * // => 2
-   *
-   * _.size({ 'one': 1, 'two': 2, 'three': 3 });
-   * // => 3
-   *
-   * _.size('curly');
-   * // => 5
-   */
-  function size(value) {
-    if (!value) {
-      return 0;
-    }
-    var length = value.length;
-    return length === length >>> 0 ? value.length : keys(value).length;
-  }
-
-  /**
-   * Produces an array of `object`'s own enumerable property values.
-   *
-   * @static
-   * @memberOf _
-   * @category Objects
-   * @param {Object} object The object to inspect.
-   * @returns {Array} Returns a new array of property values.
-   * @example
-   *
-   * _.values({ 'one': 1, 'two': 2, 'three': 3 });
-   * // => [1, 2, 3]
-   */
-  var values = createIterator({
-    'args': 'object',
-    'init': '[]',
-    'inLoop': 'result.push(iteratee[index])'
-  });
-
-  /*--------------------------------------------------------------------------*/
-
-  /**
-   * Escapes a string for inclusion in HTML, replacing `&`, `<`, `"`, and `'`
-   * characters.
+   * Converts the characters `&`, `<`, `>`, `"`, and `'` in `string` to their
+   * corresponding HTML entities.
    *
    * @static
    * @memberOf _
@@ -3173,8 +3691,8 @@
    * @returns {String} Returns the escaped string.
    * @example
    *
-   * _.escape('Curly, Larry & Moe');
-   * // => "Curly, Larry &amp; Moe"
+   * _.escape('Moe, Larry & Curly');
+   * // => "Moe, Larry &amp; Curly"
    */
   function escape(string) {
     return string == null ? '' : (string + '').replace(reUnescapedHtml, escapeHtmlChar);
@@ -3182,6 +3700,7 @@
 
   /**
    * This function returns the first argument passed to it.
+   *
    * Note: It is used throughout Lo-Dash as a default callback.
    *
    * @static
@@ -3215,11 +3734,11 @@
    *   }
    * });
    *
-   * _.capitalize('curly');
-   * // => 'Curly'
-   *
-   * _('larry').capitalize();
+   * _.capitalize('larry');
    * // => 'Larry'
+   *
+   * _('curly').capitalize();
+   * // => 'Curly'
    */
   function mixin(object) {
     forEach(functions(object), function(methodName) {
@@ -3291,12 +3810,19 @@
       return null;
     }
     var value = object[property];
-    return toString.call(value) == funcClass ? object[property]() : value;
+    return isFunction(value) ? object[property]() : value;
   }
 
   /**
    * A micro-templating method that handles arbitrary delimiters, preserves
    * whitespace, and correctly escapes quotes within interpolated code.
+   *
+   * Note: In the development build `_.template` utilizes sourceURLs for easier
+   * debugging. See http://www.html5rocks.com/en/tutorials/developertools/sourcemaps/#toc-sourceurl
+   *
+   * Note: Lo-Dash may be used in Chrome extensions by either creating a `lodash csp`
+   * build and avoiding `_.template` use, or loading Lo-Dash in a sandboxed page.
+   * See http://developer.chrome.com/trunk/extensions/sandboxingEval.html
    *
    * @static
    * @memberOf _
@@ -3308,41 +3834,47 @@
    *  is given, else it returns the interpolated text.
    * @example
    *
-   * // using compiled template
+   * // using a compiled template
    * var compiled = _.template('hello: <%= name %>');
    * compiled({ 'name': 'moe' });
    * // => 'hello: moe'
    *
    * var list = '<% _.forEach(people, function(name) { %> <li><%= name %></li> <% }); %>';
-   * _.template(list, { 'people': ['moe', 'curly', 'larry'] });
-   * // => '<li>moe</li><li>curly</li><li>larry</li>'
+   * _.template(list, { 'people': ['moe', 'larry', 'curly'] });
+   * // => '<li>moe</li><li>larry</li><li>curly</li>'
    *
-   * var template = _.template('<b><%- value %></b>');
-   * template({ 'value': '<script>' });
+   * // using the "escape" delimiter to escape HTML in data property values
+   * _.template('<b><%- value %></b>', { 'value': '<script>' });
    * // => '<b>&lt;script></b>'
    *
-   * // using `print`
-   * var compiled = _.template('<% print("Hello " + epithet); %>');
-   * compiled({ 'epithet': 'stooge' });
+   * // using the internal `print` function in "evaluate" delimiters
+   * _.template('<% print("Hello " + epithet); %>', { 'epithet': 'stooge' });
    * // => 'Hello stooge.'
    *
-   * // using custom template settings
+   * // using custom template delimiter settings
    * _.templateSettings = {
    *   'interpolate': /\{\{(.+?)\}\}/g
    * };
    *
-   * var template = _.template('Hello {{ name }}!');
-   * template({ 'name': 'Mustache' });
+   * _.template('Hello {{ name }}!', { 'name': 'Mustache' });
    * // => 'Hello Mustache!'
    *
-   * // using the `variable` option
-   * _.template('<%= data.hasWith %>', { 'hasWith': 'no' }, { 'variable': 'data' });
-   * // => 'no'
+   * // using the `variable` option to ensure a with-statement isn't used in the compiled template
+   * var compiled = _.template('hello: <%= data.name %>', null, { 'variable': 'data' });
+   * compiled.source;
+   * // => function(data) {
+   *   var __t, __p = '', __e = _.escape;
+   *   __p += 'hello: ' + ((__t = ( data.name )) == null ? '' : __t);
+   *   return __p;
+   * }
    *
-   * // using the `source` property
-   * <script>
-   *   JST.project = <%= _.template(jstText).source %>;
-   * </script>
+   * // using the `source` property to inline compiled templates for meaningful
+   * // line numbers in error messages and a stack trace
+   * fs.writeFileSync(path.join(cwd, 'jst.js'), '\
+   *   var JST = {\
+   *     "main": ' + _.template(mainText).source + '\
+   *   };\
+   * ');
    */
   function template(text, data, options) {
     // based on John Resig's `tmpl` implementation
@@ -3350,6 +3882,7 @@
     // and Laura Doktorova's doT.js
     // https://github.com/olado/doT
     options || (options = {});
+    text += '';
 
     var isEvaluating,
         result,
@@ -3357,14 +3890,17 @@
         evaluateDelimiter = options.evaluate,
         interpolateDelimiter = options.interpolate,
         settings = lodash.templateSettings,
-        variable = options.variable;
+        variable = options.variable || settings.variable,
+        hasVariable = variable;
 
     // use default settings if no options object is provided
     if (escapeDelimiter == null) {
       escapeDelimiter = settings.escape;
     }
     if (evaluateDelimiter == null) {
-      evaluateDelimiter = settings.evaluate;
+      // use `false` as the fallback value, instead of leaving it `undefined`,
+      // so the initial assignment of `reEvaluateDelimiter` will still occur
+      evaluateDelimiter = settings.evaluate || false;
     }
     if (interpolateDelimiter == null) {
       interpolateDelimiter = settings.interpolate;
@@ -3382,8 +3918,8 @@
       // and internal `<e%- %>`, `<e%= %>` delimiters
       lastEvaluateDelimiter = evaluateDelimiter;
       reEvaluateDelimiter = RegExp(
-        (evaluateDelimiter ? evaluateDelimiter.source : '($^)') +
-        '|<e%-([\\s\\S]+?)%>|<e%=([\\s\\S]+?)%>'
+        '<e%-([\\s\\S]+?)%>|<e%=([\\s\\S]+?)%>' +
+        (evaluateDelimiter ? '|' + evaluateDelimiter.source : '')
       , 'g');
     }
     isEvaluating = tokenized.length;
@@ -3399,11 +3935,11 @@
     // clear stored code snippets
     tokenized.length = 0;
 
-    // if `options.variable` is not specified and the template contains "evaluate"
+    // if `variable` is not specified and the template contains "evaluate"
     // delimiters, wrap a with-statement around the generated code to add the
     // data object to the top of the scope chain
-    if (!variable) {
-      variable = settings.variable || lastVariable || 'obj';
+    if (!hasVariable) {
+      variable = lastVariable || 'obj';
 
       if (isEvaluating) {
         text = 'with (' + variable + ') {\n' + text + '\n}\n';
@@ -3429,12 +3965,12 @@
 
     // frame code as the function body
     text = 'function(' + variable + ') {\n' +
-      variable + ' || (' + variable + ' = {});\n' +
+      (hasVariable ? '' : variable + ' || (' + variable + ' = {});\n') +
       'var __t, __p = \'\', __e = _.escape' +
       (isEvaluating
         ? ', __j = Array.prototype.join;\n' +
           'function print() { __p += __j.call(arguments, \'\') }\n'
-        : ', __d = ' + variable + '.' + variable + ' || ' + variable + ';\n'
+        : (hasVariable ? '' : ', __d = ' + variable + '.' + variable + ' || ' + variable) + ';\n'
       ) +
       text +
       'return __p\n}';
@@ -3459,7 +3995,7 @@
     }
     // provide the compiled function's source via its `toString` method, in
     // supported environments, or the `source` property as a convenience for
-    // build time precompilation
+    // inlining compiled templates during the build process
     result.source = text;
     return result;
   }
@@ -3493,6 +4029,24 @@
         callback(index);
       }
     }
+  }
+
+  /**
+   * Converts the HTML entities `&amp;`, `&lt;`, `&gt;`, `&quot;`, and `&#x27;`
+   * in `string` to their corresponding characters.
+   *
+   * @static
+   * @memberOf _
+   * @category Utilities
+   * @param {String} string The string to unescape.
+   * @returns {String} Returns the unescaped string.
+   * @example
+   *
+   * _.unescape('Moe, Larry &amp; Curly');
+   * // => "Moe, Larry & Curly"
+   */
+  function unescape(string) {
+    return string == null ? '' : (string + '').replace(reEscapedHtml, unescapeHtmlChar);
   }
 
   /**
@@ -3553,7 +4107,7 @@
    * @static
    * @memberOf _
    * @category Chaining
-   * @param {Mixed} value The value to pass to `callback`.
+   * @param {Mixed} value The value to pass to `interceptor`.
    * @param {Function} interceptor The function to invoke.
    * @returns {Mixed} Returns `value`.
    * @example
@@ -3614,7 +4168,7 @@
    * @memberOf _
    * @type String
    */
-  lodash.VERSION = '0.4.2';
+  lodash.VERSION = '0.6.1';
 
   // assign static methods
   lodash.after = after;
@@ -3625,11 +4179,13 @@
   lodash.compact = compact;
   lodash.compose = compose;
   lodash.contains = contains;
+  lodash.countBy = countBy;
   lodash.debounce = debounce;
   lodash.defaults = defaults;
   lodash.defer = defer;
   lodash.delay = delay;
   lodash.difference = difference;
+  lodash.drop = drop;
   lodash.escape = escape;
   lodash.every = every;
   lodash.extend = extend;
@@ -3670,6 +4226,7 @@
   lodash.map = map;
   lodash.max = max;
   lodash.memoize = memoize;
+  lodash.merge = merge;
   lodash.min = min;
   lodash.mixin = mixin;
   lodash.noConflict = noConflict;
@@ -3693,10 +4250,12 @@
   lodash.throttle = throttle;
   lodash.times = times;
   lodash.toArray = toArray;
+  lodash.unescape = unescape;
   lodash.union = union;
   lodash.uniq = uniq;
   lodash.uniqueId = uniqueId;
   lodash.values = values;
+  lodash.where = where;
   lodash.without = without;
   lodash.wrap = wrap;
   lodash.zip = zip;
@@ -3714,6 +4273,7 @@
   lodash.include = contains;
   lodash.inject = reduce;
   lodash.methods = functions;
+  lodash.omit = drop;
   lodash.select = filter;
   lodash.tail = rest;
   lodash.take = first;
@@ -3744,13 +4304,9 @@
       var value = this._wrapped;
       func.apply(value, arguments);
 
-      // Firefox < 10, IE compatibility mode, and IE < 9 have buggy Array
-      // `shift()` and `splice()` functions that fail to remove the last element,
-      // `value[0]`, of array-like objects even though the `length` property is
-      // set to `0`. The `shift()` method is buggy in IE 8 compatibility mode,
-      // while `splice()` is buggy regardless of mode in IE < 9 and buggy in
-      // compatibility mode in IE 9.
-      if (value.length === 0) {
+      // avoid array-like object bugs with `Array#shift` and `Array#splice` in
+      // Firefox < 10 and IE < 9
+      if (hasObjectSpliceBug && value.length === 0) {
         delete value[0];
       }
       if (this._chain) {
