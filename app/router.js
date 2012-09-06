@@ -1,40 +1,25 @@
 define([
 // Application.
-"app", "modules/category", "modules/question"],
+'app', 'models/question', 'collections/question', 'views/question/list', 'views/question/single', 'collections/category', 'views/category/list'],
 
-function(app, Category, Question) {
-
-  // Defining the application router, you can attach sub routers here.
+function(app, QuestionModel, QuestionCollection, QuestionListView, QuestionSingleView, CategoryCollection, CategoryListView) {
+  'use strict';
   var Router = Backbone.Router.extend({
     routes: {
-      "": "index"
+      '': 'index',
+      'question/:id': 'single_question'
     },
 
     initialize: function() {
-      // Set up the users.
-      this.questions = new Question.Collection();
+      this.questions = new QuestionCollection();
+      this.categories = new CategoryCollection();
 
-      this.categories = new Category.Collection();
-
-      // Use main layout and set Views.
-      app.useLayout("main");
-
-      app.layout.setViews({
-        ".questions": new Question.Views.List({
-          collection: this.questions
-        }),
-        ".categories": new Category.Views.List({
-          collection: this.categories
-        })
-      });
-    },
-
-    index: function() {
-      app.useLayout("main").render();
       //mock data
       this.questions.add([{
+        id: 1,
         description: 'Description one.'
       }, {
+        id: 2,
         description: 'Desription two.'
       }]);
 
@@ -43,18 +28,43 @@ function(app, Category, Question) {
         id: 1,
         can_add_questions: false,
         parent: null
-      },{
+      }, {
         name: 'Math',
         id: 2,
         can_add_questions: true,
         parent: 1
-      }
-      ]);
+      }]);
+
+      // Use main layout and set Views.
+      app.useLayout('main');
+    },
+
+    index: function() {
+      app.layout.setViews({
+        '.questions': new QuestionListView({
+          collection: this.questions
+        }),
+        '.categories': new CategoryListView({
+          collection: this.categories
+        })
+      });
+      app.useLayout('main').render();
 
       this.questions.trigger('reset');
       this.categories.trigger('reset');
-    }
 
+    },
+
+    single_question: function(id) {
+      var question = this.questions.get(id);
+
+      app.layout.setViews({
+        '.questions': new QuestionSingleView({
+          model: question
+        })
+      });
+      app.useLayout('main').render();
+    }
 
   });
 

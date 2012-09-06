@@ -44,11 +44,6 @@ function($, _, Backbone) {
 
   // Mix Backbone.Events, modules, and layout management into the app object.
   return _.extend(app, {
-    // Create a custom object with a nested Views object.
-    module: function(additionalProps) {
-      return _.extend({ Views: {} }, additionalProps);
-    },
-
     // Helper for using layouts.
     useLayout: function(name) {
       // If already using this Layout, then don't re-inject into the DOM.
