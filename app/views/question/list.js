@@ -1,10 +1,15 @@
-define(['backbone', 'views/question/item'], function(Backbone, Item) {
+define([
+  'backbone',
+  'views/question/item'
+  ],
+
+function(Backbone, Item) {
   'use strict';
   var QuestionList = Backbone.View.extend({
     template: 'question/list',
 
     initialize: function() {
-      this.collection.on('reset', this.render, this);
+      this.collection.on('reset', this.beforeRender, this);
     },
 
     beforeRender: function() {

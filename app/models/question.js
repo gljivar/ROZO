@@ -1,4 +1,8 @@
-define(['backbone'], function(Backbone) {
+define([
+  'backbone'
+  ],
+
+function(Backbone) {
   'use strict';
   var Question = Backbone.Model.extend({
 

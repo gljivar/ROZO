@@ -1,4 +1,9 @@
-define(['backbone', 'views/category/item'], function(Backbone, Item) {
+define([
+  'backbone',
+  'views/category/item'
+  ],
+
+function(Backbone, Item) {
   'use strict';
   var QuestionList = Backbone.View.extend({
     template: 'question/list',

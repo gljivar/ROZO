@@ -10,11 +10,7 @@ define([
 ],
 
 function($, _, Backbone) {
-
-  // Provide a global location to place configuration settings and module
-  // creation.
   var app = {
-    // The root path to run the application.
     root: "/"
   };
 
@@ -42,7 +38,7 @@ function($, _, Backbone) {
     }
   });
 
-  // Mix Backbone.Events, modules, and layout management into the app object.
+  // Mix Backbone.Events and layout management into the app object.
   return _.extend(app, {
     // Helper for using layouts.
     useLayout: function(name) {
