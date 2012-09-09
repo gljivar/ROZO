@@ -1,23 +1,25 @@
 define([
   'app',
   'views/question/list',
+  'views/question/new',
   'views/question/single'
   ],
 
-function(app, QuestionListView, QuestionSingleView) {
+function(app, QuestionListView, QuestionNewView, QuestionSingleView) {
   'use strict';
   var Router = Backbone.Router.extend({
     routes: {
-      'question/': 'question_list',
-      'question/:id': 'question_single'
+      'question': 'list',
+      'question/': 'list',
+      'question/new': 'new',
+      'question/:id': 'single'
     },
 
     initialize: function(options) {
       this.questions = options.collections.questions;
     },
 
-    question_list: function() {
-      app.useLayout('main');
+    list: function() {
       app.layout.setViews({
         '.content': new QuestionListView({
           collection: this.questions
@@ -26,8 +28,16 @@ function(app, QuestionListView, QuestionSingleView) {
       app.layout.render();
     },
 
-    question_single: function(id) {
-      app.useLayout('main');
+    'new': function() {
+      app.layout.setViews({
+        '.content': new QuestionNewView({
+          collection: this.questions
+        })
+      });
+      app.layout.render();
+    }, 
+
+    single: function(id) {
       var question = this.questions.get(id);
       app.layout.setViews({
         '.content': new QuestionSingleView({
