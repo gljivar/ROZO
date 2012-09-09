@@ -1,6 +1,6 @@
 require([
-  "app",
-  "routers/main"
+  'app',
+  'routers/main'
   ],
 
 function(app, Router) {
@@ -10,12 +10,17 @@ function(app, Router) {
     root: app.root
   });
 
-  $(document).on("click", "a:not([data-bypass])", function(evt) {
-    var href = $(this).attr("href");
-    if (href && href.indexOf("#") === 0) {
+  $(document).on('click', 'a:not([data-bypass])', function(evt) {
+    var href = $(this).attr('href');
+    if (href && href.indexOf('#') === 0) {
       evt.preventDefault();
       Backbone.history.navigate(href, true);
     }
+  });
+
+  //disable default form submit action
+  $(document).on('submit', 'form', function(evt) {
+    evt.preventDefault();
   });
 
 });
