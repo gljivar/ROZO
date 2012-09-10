@@ -56,7 +56,8 @@ function(app, QuestionCollection, CategoryCollection, QuestionRouter, CategoryRo
       };
     },
 
-    index: function() {}
+    index: function() {
+    }
 
   });
 

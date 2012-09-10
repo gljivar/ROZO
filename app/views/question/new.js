@@ -28,7 +28,17 @@ function(Backbone, QuestionModel, ProvidedAnswersView) {
 
     onProvidedAnswersClick: function() {
       var container = this.$('.provided-answers');
-      container.slideToggle();
+
+      if (this.providedAnswers) {
+        container.slideToggle();
+        container.empty();
+        // TODO set option to clear anwsers in view - not delete them all 
+        this.providedAnswers = null;
+      } else {
+        this.providedAnswers = new ProvidedAnswersView();
+        this.insertView('.provided-answers', this.providedAnswers).render();
+        container.slideToggle();
+      };
     }
   });
 
